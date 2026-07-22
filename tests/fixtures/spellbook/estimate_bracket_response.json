@@ -1,1 +1,87 @@
-{"bracketTag":"E","bannedCards":[],"gameChangerCards":[],"massLandDenialCards":[],"massLandDenialTemplates":[],"massLandDenialCombos":[],"extraTurnCards":[],"extraTurnTemplates":[],"extraTurnsCombos":[],"lockCombos":[],"controlAllOpponentsCombos":[],"controlSomeOpponentsCombos":[],"skipTurnsCombos":[],"twoCardCombos":[]}
+{
+  "bracketTag": "R",
+  "cards": [
+    {
+      "card": {
+        "id": 7593,
+        "name": "Ancient Tomb",
+        "oracleId": "23467047",
+        "spoiler": false,
+        "typeLine": "Land"
+      },
+      "quantity": 1,
+      "banned": false,
+      "gameChanger": true,
+      "massLandDenial": false,
+      "extraTurn": false
+    },
+    {
+      "card": {
+        "id": 2364,
+        "name": "Mana Vault",
+        "oracleId": "5df295e4",
+        "spoiler": false,
+        "typeLine": "Artifact"
+      },
+      "quantity": 1,
+      "banned": false,
+      "gameChanger": true,
+      "massLandDenial": false,
+      "extraTurn": false
+    },
+    {
+      "card": {
+        "id": 4918,
+        "name": "Lightning Runner",
+        "oracleId": "2f82b232",
+        "spoiler": false,
+        "typeLine": "Creature - Human Warrior"
+      },
+      "quantity": 1,
+      "banned": false,
+      "gameChanger": false,
+      "massLandDenial": false,
+      "extraTurn": false
+    }
+  ],
+  "templates": [],
+  "combos": [
+    {
+      "combo": {
+        "id": "4918-5658",
+        "status": "OK",
+        "uses": [
+          {
+            "card": {
+              "id": 5658,
+              "name": "Satya, Aetherflux Genius",
+              "oracleId": "ce8af7dd",
+              "spoiler": false,
+              "typeLine": "Legendary Creature - Human Artificer"
+            }
+          },
+          {
+            "card": {
+              "id": 4918,
+              "name": "Lightning Runner",
+              "oracleId": "2f82b232",
+              "spoiler": false,
+              "typeLine": "Creature - Human Warrior"
+            }
+          }
+        ]
+      },
+      "relevant": true,
+      "borderlineRelevant": true,
+      "arguablyTwoCard": true,
+      "definitelyTwoCard": true,
+      "speed": 4,
+      "massLandDenial": false,
+      "extraTurn": false,
+      "lock": false,
+      "skipTurns": false,
+      "controlAllOpponents": false,
+      "controlSomeOpponents": false
+    }
+  ]
+}

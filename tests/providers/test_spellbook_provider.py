@@ -177,12 +177,15 @@ class TestEstimateBracket:
             },
         )
         text = result.content[0].text
-        assert "E" in text
+        assert "R (Ruthless)" in text
+        assert "Ancient Tomb" in text  # game changer surfaced in the summary
 
         # Structured output
         sc = result.structured_content
         assert isinstance(sc, dict)
         assert "bracket_tag" in sc
+        assert sc["game_changer_cards"] == ["Ancient Tomb", "Mana Vault"]
+        assert sc["two_card_combos"] == ["Satya, Aetherflux Genius + Lightning Runner"]
         assert "banned_cards" in sc
         assert "two_card_combos" in sc
 

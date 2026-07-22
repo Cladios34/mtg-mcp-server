@@ -225,7 +225,10 @@ async def estimate_bracket(
     except SpellbookError as exc:
         raise ToolError(f"Spellbook API error: {exc}") from exc
 
-    lines = [f"**Bracket Estimate:** {result.bracket_tag or 'Unknown'}"]
+    tag = result.bracket_tag or "Unknown"
+    tag_name = result.bracket_tag_name
+    label = f"{tag} ({tag_name})" if tag_name and tag_name != tag else tag
+    lines = [f"**Bracket Estimate:** {label}"]
 
     if result.banned_cards:
         lines.append(f"Banned cards: {', '.join(result.banned_cards)}")
@@ -236,12 +239,19 @@ async def estimate_bracket(
     if result.lock_combos:
         lines.append(f"Lock combos: {', '.join(str(c) for c in result.lock_combos)}")
 
+    if result.mass_land_denial_cards:
+        lines.append(f"Mass land denial: {', '.join(result.mass_land_denial_cards)}")
+    if result.extra_turn_cards:
+        lines.append(f"Extra-turn cards: {', '.join(result.extra_turn_cards)}")
+
     if not any(
         [
             result.banned_cards,
             result.game_changer_cards,
             result.two_card_combos,
             result.lock_combos,
+            result.mass_land_denial_cards,
+            result.extra_turn_cards,
         ]
     ):
         lines.append("No bracket-relevant concerns found.")

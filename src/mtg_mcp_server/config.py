@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     seventeen_lands_base_url: str = "https://www.17lands.com"
     edhrec_base_url: str = "https://json.edhrec.com"
     moxfield_base_url: str = "https://api2.moxfield.com"
+    # Optional User-Agent override for Moxfield — its Cloudflare tier blocks
+    # some tool-like default UAs with HTTP 403. Empty = library default.
+    moxfield_user_agent: str = ""
     spicerack_base_url: str = "https://api.spicerack.gg"
     spicerack_api_key: str = ""  # Optional — sent as X-API-Key header if non-empty
     mtggoldfish_base_url: str = "https://www.mtggoldfish.com"

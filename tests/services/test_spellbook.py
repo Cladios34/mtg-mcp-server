@@ -143,7 +143,7 @@ class TestEstimateBracket:
 
     @respx.mock
     async def test_returns_bracket_estimate(self):
-        """Bracket estimation returns a BracketEstimate with a bracket tag."""
+        """Bracket estimation parses the {bracketTag, cards, combos} envelope."""
         fixture = _load_fixture("estimate_bracket_response.json")
         respx.post(f"{BASE_URL}/estimate-bracket").mock(
             return_value=httpx.Response(200, json=fixture)
@@ -151,64 +151,115 @@ class TestEstimateBracket:
 
         async with SpellbookClient(base_url=BASE_URL) as client:
             result = await client.estimate_bracket(
-                commanders=["Muldrotha, the Gravetide"],
-                decklist=["Sol Ring", "Spore Frog"],
+                commanders=["Satya, Aetherflux Genius"],
+                decklist=["Ancient Tomb", "Mana Vault", "Lightning Runner"],
             )
 
         assert isinstance(result, BracketEstimate)
-        assert result.bracket_tag == "E"
+        assert result.bracket_tag == "R"
+        assert result.bracket_tag_name == "Ruthless"
 
-    def test_bracket_handles_dict_game_changers(self):
-        """Game changer cards returned as dicts are coerced to card names."""
+    def test_game_changers_derived_from_card_flags(self):
+        """game_changer_cards is computed from per-card gameChanger flags."""
         data = {
-            "bracketTag": "E",
-            "bannedCards": [],
-            "gameChangerCards": [
-                {"id": 4966, "name": "Chrome Mox", "oracleId": "uuid-1", "imageUri": None},
-                {"id": 123, "name": "Mana Vault", "oracleId": "uuid-2", "imageUri": None},
-            ],
-            "twoCardCombos": [],
-            "lockCombos": [],
-        }
-        result = BracketEstimate.model_validate(data)
-        assert result.game_changer_cards == ["Chrome Mox", "Mana Vault"]
-
-    def test_bracket_handles_dict_two_card_combos(self):
-        """Two-card combo entries returned as dicts are coerced to descriptions."""
-        data = {
-            "bracketTag": "E",
-            "bannedCards": [],
-            "gameChangerCards": [],
-            "twoCardCombos": [
+            "bracketTag": "P",
+            "cards": [
                 {
-                    "combo": {"id": "742-129", "name": None},
-                    "cards": [
-                        {"id": 742, "name": "Thassa's Oracle"},
-                        {"id": 129, "name": "Demonic Consultation"},
-                    ],
+                    "card": {"id": 1, "name": "Rhystic Study"},
+                    "quantity": 1,
+                    "banned": False,
+                    "gameChanger": True,
+                    "massLandDenial": False,
+                    "extraTurn": False,
+                },
+                {
+                    "card": {"id": 2, "name": "Sol Ring"},
+                    "quantity": 1,
+                    "banned": False,
+                    "gameChanger": False,
+                    "massLandDenial": False,
+                    "extraTurn": False,
+                },
+                {
+                    "card": {"id": 3, "name": "Ancestral Recall"},
+                    "quantity": 1,
+                    "banned": True,
+                    "gameChanger": False,
+                    "massLandDenial": False,
+                    "extraTurn": False,
                 },
             ],
-            "lockCombos": [],
+            "combos": [],
+        }
+        result = BracketEstimate.model_validate(data)
+        assert result.game_changer_cards == ["Rhystic Study"]
+        assert result.banned_cards == ["Ancestral Recall"]
+        assert result.two_card_combos == []
+        assert result.lock_combos == []
+
+    def test_two_card_and_lock_combos_derived_from_combo_flags(self):
+        """two_card_combos / lock_combos are computed from per-combo flags."""
+        data = {
+            "bracketTag": "R",
+            "cards": [],
+            "combos": [
+                {
+                    "combo": {
+                        "id": "742-129",
+                        "uses": [
+                            {"card": {"id": 742, "name": "Thassa's Oracle"}},
+                            {"card": {"id": 129, "name": "Demonic Consultation"}},
+                        ],
+                    },
+                    "relevant": True,
+                    "arguablyTwoCard": True,
+                    "definitelyTwoCard": True,
+                    "speed": 5,
+                    "massLandDenial": False,
+                    "extraTurn": False,
+                    "lock": False,
+                    "skipTurns": False,
+                    "controlAllOpponents": False,
+                    "controlSomeOpponents": False,
+                },
+                {
+                    "combo": {
+                        "id": "249-5141",
+                        "uses": [
+                            {"card": {"id": 249, "name": "Zethi, Arcane Blademaster"}},
+                            {"card": {"id": 5141, "name": "Teferi's Protection"}},
+                        ],
+                    },
+                    "relevant": False,
+                    "arguablyTwoCard": False,
+                    "definitelyTwoCard": False,
+                    "speed": 2,
+                    "massLandDenial": False,
+                    "extraTurn": False,
+                    "lock": True,
+                    "skipTurns": False,
+                    "controlAllOpponents": False,
+                    "controlSomeOpponents": False,
+                },
+            ],
         }
         result = BracketEstimate.model_validate(data)
         assert len(result.two_card_combos) == 1
         assert "Thassa's Oracle" in result.two_card_combos[0]
         assert "Demonic Consultation" in result.two_card_combos[0]
+        assert result.lock_combos == ["Zethi, Arcane Blademaster + Teferi's Protection"]
 
-    def test_bracket_handles_string_items(self):
-        """String items in bracket lists are preserved as-is."""
-        data = {
-            "bracketTag": "E",
-            "bannedCards": ["Ancestral Recall"],
-            "gameChangerCards": ["Sol Ring"],
-            "twoCardCombos": ["Some combo"],
-            "lockCombos": ["Lock combo"],
-        }
-        result = BracketEstimate.model_validate(data)
-        assert result.banned_cards == ["Ancestral Recall"]
-        assert result.game_changer_cards == ["Sol Ring"]
-        assert result.two_card_combos == ["Some combo"]
-        assert result.lock_combos == ["Lock combo"]
+    def test_empty_response_yields_empty_lists(self):
+        """A minimal payload still validates, with empty derived lists."""
+        result = BracketEstimate.model_validate({"bracketTag": "C"})
+        assert result.bracket_tag == "C"
+        assert result.bracket_tag_name == "Core"
+        assert result.banned_cards == []
+        assert result.game_changer_cards == []
+        assert result.two_card_combos == []
+        assert result.lock_combos == []
+        assert result.mass_land_denial_cards == []
+        assert result.extra_turn_cards == []
 
 
 class TestSpellbookServerErrors:

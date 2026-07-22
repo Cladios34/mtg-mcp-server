@@ -30,7 +30,12 @@ async def moxfield_lifespan(server: FastMCP):
     global _client
     settings = Settings()
     base_url = settings.moxfield_base_url
-    client = MoxfieldClient(base_url=base_url)
+    if settings.moxfield_user_agent:
+        client = MoxfieldClient(
+            base_url=base_url, user_agent=settings.moxfield_user_agent
+        )
+    else:
+        client = MoxfieldClient(base_url=base_url)
     async with client:
         _client = client
         yield {}

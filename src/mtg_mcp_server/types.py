@@ -18,7 +18,7 @@ Backends:
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 __all__ = [
     "ArchetypeRating",
@@ -229,44 +229,146 @@ class DecklistCombos(BaseModel):
     almost_included: list[Combo] = Field(default_factory=list)
 
 
-class BracketEstimate(BaseModel):
-    """Result of ``/estimate-bracket`` — bracket estimation for a decklist.
+BRACKET_TAG_NAMES = {
+    "E": "Exhibition",
+    "C": "Core",
+    "O": "Oddball",
+    "P": "Powerful",
+    "S": "Spicy",
+    "R": "Ruthless",
+    "B": "Banned",
+}
+"""Spellbook's own bracket scale (not the WotC 1-5 brackets).
 
-    Aliases map from Spellbook's camelCase JSON to snake_case Python fields.
-    The API returns card/combo dicts in some list fields — validators coerce
-    them to readable strings.
-    """
+Source: ``BracketTag`` enum in commander-spellbook-backend
+``spellbook/models/variant.py``.
+"""
 
-    bracket_tag: str | None = Field(None, alias="bracketTag")
-    banned_cards: list[str] = Field(default_factory=list, alias="bannedCards")
-    game_changer_cards: list[str] = Field(default_factory=list, alias="gameChangerCards")
-    two_card_combos: list[str] = Field(default_factory=list, alias="twoCardCombos")
-    lock_combos: list[str] = Field(default_factory=list, alias="lockCombos")
+
+class ClassifiedCard(BaseModel):
+    """A deck card with bracket-relevant flags from ``/estimate-bracket``."""
+
+    name: str = ""
+    quantity: int = 1
+    banned: bool = False
+    game_changer: bool = Field(False, alias="gameChanger")
+    mass_land_denial: bool = Field(False, alias="massLandDenial")
+    extra_turn: bool = Field(False, alias="extraTurn")
 
     model_config = {"populate_by_name": True}
 
-    @field_validator("banned_cards", "game_changer_cards", "lock_combos", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _extract_card_names(cls, v: list) -> list[str]:
-        """Extract card names from card dicts, keep strings as-is."""
-        return [item.get("name", str(item)) if isinstance(item, dict) else str(item) for item in v]
+    def _flatten_card(cls, data: object) -> object:
+        """Lift ``{"card": {"name": ...}, ...flags}`` payloads to a flat ``name``."""
+        if isinstance(data, dict) and isinstance(data.get("card"), dict):
+            data = {**data, "name": data["card"].get("name", "")}
+        return data
 
-    @field_validator("two_card_combos", mode="before")
+
+class ClassifiedCombo(BaseModel):
+    """A detected combo with bracket-relevant flags from ``/estimate-bracket``."""
+
+    id: str = ""
+    card_names: list[str] = Field(default_factory=list)
+    relevant: bool = False
+    arguably_two_card: bool = Field(False, alias="arguablyTwoCard")
+    definitely_two_card: bool = Field(False, alias="definitelyTwoCard")
+    speed: int = 0
+    mass_land_denial: bool = Field(False, alias="massLandDenial")
+    extra_turn: bool = Field(False, alias="extraTurn")
+    lock: bool = False
+    skip_turns: bool = Field(False, alias="skipTurns")
+    control_all_opponents: bool = Field(False, alias="controlAllOpponents")
+    control_some_opponents: bool = Field(False, alias="controlSomeOpponents")
+
+    model_config = {"populate_by_name": True}
+
+    @model_validator(mode="before")
     @classmethod
-    def _extract_combo_descriptions(cls, v: list) -> list[str]:
-        """Extract card names from combo variant dicts, keep strings as-is."""
-        result: list[str] = []
-        for item in v:
-            if isinstance(item, dict):
-                cards = item.get("cards", [])
-                if isinstance(cards, list) and cards:
-                    names = [c.get("name", "?") if isinstance(c, dict) else str(c) for c in cards]
-                    result.append(" + ".join(names))
-                else:
-                    result.append(item.get("name", str(item)))
-            else:
-                result.append(str(item))
-        return result
+    def _flatten_combo(cls, data: object) -> object:
+        """Lift ``{"combo": {"id", "uses": [{"card": ...}]}, ...flags}`` payloads."""
+        if isinstance(data, dict) and isinstance(data.get("combo"), dict):
+            combo = data["combo"]
+            names = [
+                u["card"].get("name", "?")
+                for u in combo.get("uses", [])
+                if isinstance(u, dict) and isinstance(u.get("card"), dict)
+            ]
+            data = {**data, "id": str(combo.get("id", "")), "card_names": names}
+        return data
+
+    @property
+    def description(self) -> str:
+        """Human-readable ``Card A + Card B`` label for this combo."""
+        return " + ".join(self.card_names) if self.card_names else self.id
+
+
+class BracketEstimate(BaseModel):
+    """Result of ``/estimate-bracket`` — bracket estimation for a decklist.
+
+    The API returns ``{bracketTag, cards, templates, combos}`` where each
+    entry carries per-item boolean flags (``banned``, ``gameChanger``,
+    ``massLandDenial``, ``extraTurn`` on cards; two-card/lock/extra-turn
+    classifications on combos). The convenience lists below are computed
+    from those flags so downstream consumers keep the historical field
+    names. ``bracket_tag`` uses Spellbook's own scale (see
+    ``BRACKET_TAG_NAMES``), not the WotC 1-5 brackets.
+    """
+
+    bracket_tag: str | None = Field(None, alias="bracketTag")
+    cards: list[ClassifiedCard] = Field(default_factory=list)
+    combos: list[ClassifiedCombo] = Field(default_factory=list)
+
+    model_config = {"populate_by_name": True}
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def bracket_tag_name(self) -> str | None:
+        """Spellbook tag spelled out (e.g. ``R`` -> ``Ruthless``)."""
+        if self.bracket_tag is None:
+            return None
+        return BRACKET_TAG_NAMES.get(self.bracket_tag, self.bracket_tag)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def banned_cards(self) -> list[str]:
+        """Names of cards flagged as banned."""
+        return [c.name for c in self.cards if c.banned]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def game_changer_cards(self) -> list[str]:
+        """Names of cards flagged as Game Changers."""
+        return [c.name for c in self.cards if c.game_changer]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def mass_land_denial_cards(self) -> list[str]:
+        """Names of cards flagged as mass land denial."""
+        return [c.name for c in self.cards if c.mass_land_denial]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def extra_turn_cards(self) -> list[str]:
+        """Names of cards flagged as extra-turn effects."""
+        return [c.name for c in self.cards if c.extra_turn]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def two_card_combos(self) -> list[str]:
+        """Combos classified as (at least arguably) two-card."""
+        return [
+            c.description
+            for c in self.combos
+            if c.definitely_two_card or c.arguably_two_card
+        ]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def lock_combos(self) -> list[str]:
+        """Combos classified as locks."""
+        return [c.description for c in self.combos if c.lock]
 
 
 # ---------------------------------------------------------------------------
