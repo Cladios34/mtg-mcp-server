@@ -1519,10 +1519,16 @@ async def simulate_opening_hands(
         int | None, Field(description="RNG seed for reproducible results (omit for random)")
     ] = None,
     min_lands: Annotated[
-        int, Field(description="Minimum effective lands to keep an opening hand")
+        int,
+        Field(
+            description="Keep threshold: minimum turn-3 developed mana (playability rule) or minimum effective lands (lands_v1 rule)"
+        ),
     ] = 2,
     max_lands: Annotated[
-        int, Field(description="Maximum effective lands to keep an opening hand")
+        int,
+        Field(
+            description="Maximum effective land cards in a kept hand (flood check, MDFC count 0.5)"
+        ),
     ] = 5,
     count_mdfc_lands: Annotated[
         bool, Field(description="Count modal-double-faced land backs as half a land")
