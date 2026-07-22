@@ -595,6 +595,12 @@ def _categorize_card(card: Card) -> str:
 
     if "land" in type_lower and "creature" not in type_lower:
         return "lands"
+    # Mana rocks/dorks (Sol Ring, signets, talismans, Mana Vault...): their oracle
+    # text often reads just "{T}: Add {C}." without the words "mana" or "land",
+    # so the generic ramp check below silently misses them (measured 2026-07-22:
+    # a Commander deck with 11 rocks reported ramp=3).
+    if "{t}: add {" in oracle_lower or "{t}: add one mana" in oracle_lower:
+        return "ramp"
     if any(t in oracle_lower for t in ["add {", "add one mana", "search your library for a"]) and (
         "land" in oracle_lower or "mana" in oracle_lower
     ):
@@ -635,7 +641,8 @@ async def complete_deck(
         decklist: Partial list of card names.
         format: Format for target size and legality.
         bulk: Initialized ScryfallBulkClient.
-        commander: Commander name (unused currently, reserved for future enrichment).
+        commander: Commander name. When provided, suggestions are filtered to the
+            commander's color identity (a Mardu deck never gets green suggestions).
         budget: Optional max price per card.
         on_progress: Optional progress callback.
         response_format: Output verbosity.
@@ -660,6 +667,14 @@ async def complete_deck(
             resolved.append(card)
         else:
             unresolved.append(name)
+
+    # Resolve the commander's color identity so suggestions stay in-identity
+    # (bug fixed 2026-07-22: green cards were suggested for a Mardu deck).
+    commander_identity: frozenset[str] | None = None
+    if commander:
+        commander_card = (await bulk.get_cards([commander])).get(commander)
+        if commander_card is not None:
+            commander_identity = frozenset(commander_card.color_identity)
 
     # Step 2: Categorize resolved cards
     if on_progress is not None:
@@ -708,6 +723,7 @@ async def complete_deck(
             text_any=cat_text_any,
             type_contains=cat_type_contains,
             format=fmt,
+            color_identity=commander_identity,
             max_price=budget,
             limit=cat_limit,
         )

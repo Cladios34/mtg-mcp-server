@@ -608,6 +608,96 @@ class TestCompleteDeck:
 
         assert result.markdown is not None
 
+    async def test_suggestions_filtered_by_commander_identity(
+        self, mock_bulk: AsyncMock
+    ) -> None:
+        """Suggestions are constrained to the commander's color identity.
+
+        Regression test (2026-07-22): a Mardu (WBR) deck received green
+        suggestions because the resolved commander identity was never passed
+        to filter_cards.
+        """
+        creature = _mock_card("Grizzly Bears", type_line="Creature - Bear", cmc=2.0)
+        kaalia = _mock_card(
+            "Kaalia of the Vast",
+            type_line="Legendary Creature - Human Cleric",
+            color_identity=["B", "R", "W"],
+        )
+        mock_bulk.get_cards = AsyncMock(
+            side_effect=lambda names: {
+                "Grizzly Bears": creature if "Grizzly Bears" in names else None,
+                "Kaalia of the Vast": kaalia if "Kaalia of the Vast" in names else None,
+            }
+        )
+        mock_bulk.filter_cards = AsyncMock(return_value=[])
+
+        await complete_deck(
+            ["Grizzly Bears"],
+            "commander",
+            bulk=mock_bulk,
+            commander="Kaalia of the Vast",
+        )
+
+        assert mock_bulk.filter_cards.call_count > 0
+        for call in mock_bulk.filter_cards.call_args_list:
+            assert call.kwargs["color_identity"] == frozenset({"B", "R", "W"})
+
+    async def test_unresolved_commander_leaves_suggestions_unfiltered(
+        self, mock_bulk: AsyncMock
+    ) -> None:
+        """An unresolvable commander name degrades gracefully (no identity filter)."""
+        cards = {"Card A": _mock_card("Card A")}
+        mock_bulk.get_cards = AsyncMock(
+            side_effect=lambda names: cards if "Card A" in names else {}
+        )
+        mock_bulk.filter_cards = AsyncMock(return_value=[])
+
+        result = await complete_deck(
+            ["Card A"],
+            "commander",
+            bulk=mock_bulk,
+            commander="Not A Real Card",
+        )
+
+        assert result.markdown is not None
+        for call in mock_bulk.filter_cards.call_args_list:
+            assert call.kwargs["color_identity"] is None
+
+    async def test_mana_rocks_categorized_as_ramp(self, mock_bulk: AsyncMock) -> None:
+        """Mana rocks whose oracle text lacks the words 'mana'/'land' count as ramp.
+
+        Regression test (2026-07-22): Sol Ring, signets and talismans were
+        classified as 'artifacts', so a deck with 11 rocks reported ramp=3
+        and complete_deck announced a phantom ramp gap.
+        """
+        from mtg_mcp_server.workflows.building import _categorize_card
+
+        sol_ring = _mock_card(
+            "Sol Ring", type_line="Artifact", oracle_text="{T}: Add {C}{C}."
+        )
+        signet = _mock_card(
+            "Boros Signet",
+            type_line="Artifact",
+            oracle_text="{1}, {T}: Add {R}{W}.",
+        )
+        arcane = _mock_card(
+            "Arcane Signet",
+            type_line="Artifact",
+            oracle_text=(
+                "{T}: Add one mana of any color in your commander's color identity."
+            ),
+        )
+        whip = _mock_card(
+            "Whip of Erebos",
+            type_line="Legendary Enchantment Artifact",
+            oracle_text="Creatures you control have lifelink.",
+        )
+
+        assert _categorize_card(sol_ring) == "ramp"
+        assert _categorize_card(signet) == "ramp"
+        assert _categorize_card(arcane) == "ramp"
+        assert _categorize_card(whip) != "ramp"
+
     async def test_progress_reporting(self, mock_bulk: AsyncMock) -> None:
         """Progress callback is invoked during processing."""
         cards = {f"Card {i}": _mock_card(f"Card {i}") for i in range(5)}
