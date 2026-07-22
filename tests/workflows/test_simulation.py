@@ -9,9 +9,14 @@ import pytest
 from mtg_mcp_server.services.scryfall import CardNotFoundError
 from mtg_mcp_server.types import Card, CardPrices
 from mtg_mcp_server.workflows.simulation import (
+    _bottom_cards_playability,
     _CardClass,
+    _classify_card,
     _goldfish,
     _hypergeom_pmf,
+    _keep_playability,
+    _mana_production,
+    _run_simulation,
     _Slot,
     hand_probability,
     simulate_opening_hands,
@@ -161,6 +166,18 @@ MDFC_LAND = _make_card(
     mana_cost="{5}{U}{U}",
     cmc=7.0,
 )
+SIGNET = _make_card(
+    "Fake Signet", type_line="Artifact", mana_cost="{2}", cmc=2.0, oracle_text="{T}: Add {W}."
+)
+
+
+def _slot_of(
+    card: Card, *, extra: frozenset[str] = frozenset(), exclude: frozenset[str] = frozenset()
+) -> _Slot:
+    """Reduce a resolved ``Card`` to the ``_Slot`` the simulation engine consumes."""
+    cls = _classify_card(card, extra_mana_sources=extra, exclude_cards=exclude)
+    production = _mana_production(card, cls)
+    return _Slot(cls, round(card.cmc), production)
 
 
 def _big_deck(*, forests: int = 36, mdfc: int = 4, creatures: int = 59) -> dict[str, Card]:
@@ -206,7 +223,13 @@ class TestSimulateOpeningHands:
         assert result_a.data["kept_land_distribution"] != result_c.data["kept_land_distribution"]
 
     async def test_kept_land_distribution_matches_hypergeometric(self):
-        """No mulligan (min_lands=0, max_lands=7): distribution matches the exact PMF."""
+        """No mulligan (min_lands=0, max_lands=7): distribution matches the exact PMF.
+
+        Pinned to the legacy lands-only keep rule (``keep_rule="lands_v1"``,
+        ``free_mulligan=False``): the hypergeometric PMF this test compares
+        against only models raw land draws, not the playability rule's
+        hand-development/gas checks.
+        """
         cards = _bear_cards(63)
         cards["forest"] = FOREST
         bulk = _make_bulk(cards)
@@ -218,6 +241,8 @@ class TestSimulateOpeningHands:
             seed=42,
             min_lands=0,
             max_lands=7,
+            keep_rule="lands_v1",
+            free_mulligan=False,
             bulk=bulk,
             scryfall=_make_scryfall(cards),
         )
@@ -321,6 +346,7 @@ class TestSimulateOpeningHands:
         keep_pct = result.data["keep_pct_by_hand_size"]
         assert sum(keep_pct.values()) == pytest.approx(1.0)
         assert keep_pct[7] < 0.6
+        assert keep_pct[4] > 0  # forced keeps at 4 cards must actually occur
 
     async def test_deck_too_small_raises(self):
         cards = {"forest": FOREST, "bear 1": _make_card("Bear 1")}
@@ -413,3 +439,205 @@ class TestGoldfishDeterministic:
         assert result["spendable_by_turn"][0] == 0.0
         assert result["spendable_by_turn"][1] == 2.0
         assert result["ramp_by_turn2"] is True
+
+
+# ---------------------------------------------------------------------------
+# _keep_playability -- playability keep rule, direct calls
+# ---------------------------------------------------------------------------
+
+_KEEP_PLAYABILITY_KWARGS = {
+    "min_lands": 2,
+    "max_lands": 5,
+    "count_mdfc_lands": True,
+    "gas_cmc_threshold": 4,
+}
+
+
+class TestKeepPlayability:
+    """Direct calls to ``_keep_playability``, defaults min_lands=2/max_lands=5/mdfc=True/gas=4."""
+
+    def test_land_plus_rock_is_keepable(self):
+        hand = [_slot_of(FOREST), _slot_of(SOL_RING)]
+        hand += [_slot_of(_make_card(f"Bear {i}")) for i in range(5)]
+        assert _keep_playability(hand, **_KEEP_PLAYABILITY_KWARGS) is None
+
+    def test_slow_rock_only_hand_screws(self):
+        hand = [_slot_of(FOREST), _slot_of(SIGNET)]
+        hand += [_slot_of(_make_card(f"Bear {i}")) for i in range(5)]
+        assert _keep_playability(hand, **_KEEP_PLAYABILITY_KWARGS) == "screw"
+
+    def test_land_plus_two_rocks_is_keepable(self):
+        hand = [_slot_of(FOREST), _slot_of(SOL_RING), _slot_of(SIGNET)]
+        hand += [_slot_of(_make_card(f"Bear {i}")) for i in range(4)]
+        assert _keep_playability(hand, **_KEEP_PLAYABILITY_KWARGS) is None
+
+    def test_two_lands_no_ramp_is_keepable(self):
+        hand = [_slot_of(FOREST), _slot_of(FOREST)]
+        hand += [_slot_of(_make_card(f"Bear {i}")) for i in range(5)]
+        assert _keep_playability(hand, **_KEEP_PLAYABILITY_KWARGS) is None
+
+    def test_land_plus_dork_is_keepable(self):
+        hand = [_slot_of(FOREST), _slot_of(LLANOWAR_ELVES)]
+        hand += [_slot_of(_make_card(f"Bear {i}")) for i in range(5)]
+        assert _keep_playability(hand, **_KEEP_PLAYABILITY_KWARGS) is None
+
+    def test_zero_land_double_rock_hand_is_keepable(self):
+        hand = [_Slot(_CardClass.ROCK, 0, 1), _Slot(_CardClass.ROCK, 0, 1)]
+        hand += [_slot_of(_make_card(f"Bear {i}")) for i in range(5)]
+        assert _keep_playability(hand, **_KEEP_PLAYABILITY_KWARGS) is None
+
+    def test_six_lands_one_bear_floods(self):
+        hand = [_slot_of(FOREST) for _ in range(6)] + [_slot_of(_make_card("Bear 0"))]
+        assert _keep_playability(hand, **_KEEP_PLAYABILITY_KWARGS) == "flood"
+
+    def test_three_lands_four_rocks_no_gas(self):
+        hand = [_slot_of(FOREST) for _ in range(3)] + [_slot_of(SOL_RING) for _ in range(4)]
+        assert _keep_playability(hand, **_KEEP_PLAYABILITY_KWARGS) == "no_gas"
+
+    def test_two_lands_five_expensive_cards_no_gas(self):
+        hand = [_slot_of(FOREST), _slot_of(FOREST)]
+        hand += [_slot_of(_make_card(f"Big {i}", cmc=6.0)) for i in range(5)]
+        assert _keep_playability(hand, **_KEEP_PLAYABILITY_KWARGS) == "no_gas"
+
+    def test_mdfc_land_counted_toggle(self):
+        hand = [_slot_of(FOREST), _slot_of(MDFC_LAND)]
+        hand += [_slot_of(_make_card(f"Bear {i}")) for i in range(5)]
+        assert _keep_playability(hand, **_KEEP_PLAYABILITY_KWARGS) is None
+        no_mdfc_kwargs = dict(_KEEP_PLAYABILITY_KWARGS, count_mdfc_lands=False)
+        assert _keep_playability(hand, **no_mdfc_kwargs) == "screw"
+
+
+# ---------------------------------------------------------------------------
+# _bottom_cards_playability -- London mulligan bottoming, direct calls
+# ---------------------------------------------------------------------------
+
+_BOTTOM_PLAYABILITY_KWARGS = {"count_mdfc_lands": True, "max_lands": 5, "gas_cmc_threshold": 4}
+
+
+class TestBottomCardsPlayability:
+    """Direct calls to ``_bottom_cards_playability`` with fixed hands."""
+
+    def test_trims_a_land_when_flooded(self):
+        hand = [_slot_of(FOREST) for _ in range(5)]
+        hand += [_slot_of(SOL_RING), _slot_of(_make_card("Bear 0"))]
+        remaining, bottomed = _bottom_cards_playability(hand, 1, **_BOTTOM_PLAYABILITY_KWARGS)
+        assert len(bottomed) == 1
+        assert bottomed[0].cls == _CardClass.LAND
+        assert len(remaining) == len(hand) - 1
+
+    def test_bottoms_most_expensive_gas_first(self):
+        hand = [_slot_of(FOREST), _slot_of(FOREST)]
+        hand += [_slot_of(_make_card(f"Spell {cmc}", cmc=float(cmc))) for cmc in (2, 3, 4, 5, 6)]
+        remaining, bottomed = _bottom_cards_playability(hand, 2, **_BOTTOM_PLAYABILITY_KWARGS)
+        assert [c.cmc for c in bottomed] == [6, 5]
+        assert any(c.cmc == 2 for c in remaining)
+
+
+# ---------------------------------------------------------------------------
+# simulate_opening_hands -- playability keep rule, end-to-end via mocks
+# ---------------------------------------------------------------------------
+
+
+class TestSimulateOpeningHandsV2:
+    """End-to-end assertions on the playability keep rule via mocked resolution."""
+
+    async def test_free_mulligan_keeps_hand_size_seven_through_first_redraw(self):
+        """With free_mulligan=True, a hand kept after 0 or 1 mulligan is still 7 cards."""
+        cards = _bear_cards(92)
+        cards["forest"] = FOREST
+        bulk = _make_bulk(cards)
+        decklist = ["7x Forest"] + [f"Bear {i}" for i in range(92)]
+
+        result = await simulate_opening_hands(
+            decklist,
+            iterations=300,
+            seed=1,
+            free_mulligan=True,
+            bulk=bulk,
+            scryfall=_make_scryfall(cards),
+        )
+        keep_pct = result.data["keep_pct_by_hand_size"]
+        keep_pct_by_mull = result.data["keep_pct_by_mulligans"]
+        assert sum(keep_pct.values()) == pytest.approx(1.0)
+        assert sum(keep_pct_by_mull.values()) == pytest.approx(1.0)
+        assert keep_pct[7] == pytest.approx(keep_pct_by_mull["0"] + keep_pct_by_mull["1"], abs=0.02)
+
+        params = result.data["params"]
+        assert params["keep_rule"] == "playability"
+        assert params["free_mulligan"] is True
+        assert params["gas_cmc_threshold"] == 4
+
+    async def test_no_free_mulligan_hand_size_six_matches_one_mulligan(self):
+        """With free_mulligan=False, a hand kept after 1 mulligan bottoms to size 6."""
+        cards = _bear_cards(92)
+        cards["forest"] = FOREST
+        bulk = _make_bulk(cards)
+        decklist = ["7x Forest"] + [f"Bear {i}" for i in range(92)]
+
+        result = await simulate_opening_hands(
+            decklist,
+            iterations=300,
+            seed=1,
+            free_mulligan=False,
+            bulk=bulk,
+            scryfall=_make_scryfall(cards),
+        )
+        keep_pct = result.data["keep_pct_by_hand_size"]
+        keep_pct_by_mull = result.data["keep_pct_by_mulligans"]
+        assert sum(keep_pct.values()) == pytest.approx(1.0)
+        assert sum(keep_pct_by_mull.values()) == pytest.approx(1.0)
+        assert keep_pct[6] == pytest.approx(keep_pct_by_mull["1"], abs=0.02)
+
+    async def test_forced_mulligan_all_land_deck_only_no_gas(self):
+        """An all-land deck (max_lands=7, so flood never fires) is rejected purely on
+        'no_gas', forcing every hand down to 4 cards after 4 rejected mulligans."""
+        cards = {"forest": FOREST}
+        bulk = _make_bulk(cards)
+        decklist = ["99x Forest"]
+
+        result = await simulate_opening_hands(
+            decklist,
+            iterations=200,
+            seed=1,
+            max_lands=7,
+            free_mulligan=True,
+            bulk=bulk,
+            scryfall=_make_scryfall(cards),
+        )
+        assert result.data["keep_pct_by_hand_size"][4] == pytest.approx(1.0)
+        assert result.data["keep_pct_by_mulligans"]["3plus"] == pytest.approx(1.0)
+        assert result.data["mull_reasons"]["no_gas"] == 800
+
+
+# ---------------------------------------------------------------------------
+# lands_v1 exact reproduction -- bit-for-bit match of the pre-playability output
+# ---------------------------------------------------------------------------
+
+
+class TestLandsV1ExactReproduction:
+    """``keep_rule="lands_v1"`` + ``free_mulligan=False`` reproduces v1 output exactly."""
+
+    def test_matches_pre_playability_reference(self):
+        # Reference literals captured by running _run_simulation on commit 522b6cb
+        # (pre-v2 code) with this exact deck, iterations=500, seed=42.
+        deck = [_Slot(_CardClass.LAND, 0, 1)] * 36 + [_Slot(_CardClass.OTHER, 3, 0)] * 63
+
+        result = _run_simulation(
+            deck,
+            iterations=500,
+            seed=42,
+            min_lands=2,
+            max_lands=5,
+            count_mdfc_lands=True,
+            keep_rule="lands_v1",
+            free_mulligan=False,
+        )
+
+        assert result["keep_pct_by_hand_size"] == {4: 0.008, 5: 0.05, 6: 0.14, 7: 0.802}
+        assert result["kept_land_distribution"] == {
+            1.0: 0.002,
+            2.0: 0.406,
+            3.0: 0.392,
+            4.0: 0.162,
+            5.0: 0.038,
+        }

@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `simulate_opening_hands` -- Opening-hand simulation: keep rates, mulligans, net mana per turn, reproducible via `seed` (2026-07-22)
 - `hand_probability` -- Exact hypergeometric probability for card-category counts in opening hands (2026-07-22)
 
+### Changed
+- `simulate_opening_hands` v2 -- playability keep rule (3-turn hand goldfish: development, flood, gas), Commander free mulligan, smarter London bottoming, new `keep_pct_by_mulligans` and `mull_reasons` outputs; legacy behavior via `keep_rule="lands_v1"` + `free_mulligan=false` (2026-07-22)
+
 ### Fixed
 - `complete_deck`: the `commander` parameter is now actually consumed -- suggestions are filtered to the commander's color identity (was accepted-but-unused; green cards were suggested for Mardu decks) (2026-07-22)
 - `complete_deck`: multi-role card classification -- a creature that draws counts as both `creatures` and `card_draw`; mana rocks whose oracle text lacks "mana"/"land" (Sol Ring, signets, talismans) now count as ramp; removal patterns narrowed (damage-doubling text no longer classified as removal); Vilis-style "draw that many cards" and self-recursion recognized as card advantage. Kills phantom gap reports (2026-07-22)

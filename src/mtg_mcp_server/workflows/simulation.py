@@ -3,9 +3,11 @@
 Pure async functions with no MCP awareness. ``hand_probability`` is a closed-form
 calculation with no client dependency. ``simulate_opening_hands`` resolves a decklist
 bulk-data-first, classifies each card into a mana-simulation category, then runs a
-Monte Carlo goldfish simulation (London mulligan, greedy ramp casting) to estimate
-keep rates, land distribution, and mana curve. The workflow server (``server.py``)
-registers both as MCP tools and handles ToolError conversion.
+Monte Carlo goldfish simulation (Commander free mulligan, greedy ramp casting) to
+estimate keep rates, land distribution, and mana curve. The default keep rule judges
+a hand by a 3-turn goldfish of the hand alone (development, flood, gas); the legacy
+lands-only rule is available as ``keep_rule="lands_v1"``. The workflow server
+(``server.py``) registers both as MCP tools and handles ToolError conversion.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import enum
 import math
 import random
 import re
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import structlog
 
@@ -285,10 +287,55 @@ def _effective_lands(hand: list[_Slot], count_mdfc_lands: bool) -> float:
     return lands
 
 
-def _keep(hand: list[_Slot], min_lands: int, max_lands: int, count_mdfc_lands: bool) -> bool:
-    """Keep rule: effective lands within [min_lands, max_lands] inclusive."""
+def _keep_reason_lands_v1(
+    hand: list[_Slot], *, min_lands: int, max_lands: int, count_mdfc_lands: bool
+) -> str | None:
+    """Legacy keep rule: effective lands within [min_lands, max_lands] inclusive.
+
+    Weighs lands only (not rocks/dorks/curve). Preserved as ``keep_rule="lands_v1"``
+    for exact reproduction of pre-playability-rule results. Returns ``None`` if
+    the hand is keepable, otherwise the reason it was not.
+    """
     effective = _effective_lands(hand, count_mdfc_lands)
-    return min_lands <= effective <= max_lands
+    if effective < min_lands:
+        return "screw"
+    if effective > max_lands:
+        return "flood"
+    return None
+
+
+def _keep_playability(
+    hand: list[_Slot],
+    *,
+    min_lands: int,
+    max_lands: int,
+    count_mdfc_lands: bool,
+    gas_cmc_threshold: int,
+) -> str | None:
+    """Playability keep rule: hand development speed, flood, and castable gas.
+
+    Checked in this fixed order, the first failing check wins:
+
+    1. "screw" -- the hand's 3-turn goldfish (:func:`_hand_development`)
+       produces less mana on turn 3 than ``min_lands``, meaning the hand is
+       too slow to develop even accounting for rocks/dorks/ramp spells.
+    2. "flood" -- more effective lands than ``max_lands``.
+    3. "no_gas" -- no non-land, non-ramp card at or below ``gas_cmc_threshold``
+       mana value to actually do something with the mana.
+
+    Returns ``None`` if the hand is keepable.
+    """
+    if _hand_development(hand, count_mdfc_lands=count_mdfc_lands) < min_lands:
+        return "screw"
+    if _effective_lands(hand, count_mdfc_lands) > max_lands:
+        return "flood"
+    has_gas = any(
+        c.cls in (_CardClass.OTHER, _CardClass.RAMP_SPELL) and c.cmc <= gas_cmc_threshold
+        for c in hand
+    )
+    if not has_gas:
+        return "no_gas"
+    return None
 
 
 def _bottom_cards(
@@ -326,6 +373,139 @@ def _bottom_cards(
     return remaining, bottomed
 
 
+def _bottom_cards_playability(
+    hand: list[_Slot],
+    n: int,
+    *,
+    count_mdfc_lands: bool,
+    max_lands: int,
+    gas_cmc_threshold: int,
+) -> tuple[list[_Slot], list[_Slot]]:
+    """Select ``n`` cards to bottom for a London mulligan (playability rule).
+
+    Each of the ``n`` iterations bottoms exactly one slot, in this fixed
+    priority order:
+
+    1. Trim excess lands: while more than ``min(3, max_lands)`` effective
+       lands remain, bottom the first LAND (or the first MDFC_LAND if none).
+    2. Otherwise, protect the cheapest gas card (OTHER/RAMP_SPELL at or below
+       ``gas_cmc_threshold``, first on ties) and bottom the most expensive
+       OTHER/RAMP_SPELL card that is not the protected one.
+    3. Otherwise, bottom the most expensive ROCK/DORK.
+    4. Otherwise, bottom the first remaining land, then the protected gas
+       card, then whatever is left at index 0.
+    """
+    remaining = list(hand)
+    bottomed: list[_Slot] = []
+    land_cap = min(3.0, float(max_lands))
+    for _ in range(n):
+        if not remaining:
+            break
+
+        land_indices = [
+            i for i, c in enumerate(remaining) if c.cls in (_CardClass.LAND, _CardClass.MDFC_LAND)
+        ]
+        pure_land_indices = [i for i in land_indices if remaining[i].cls == _CardClass.LAND]
+        effective = _effective_lands(remaining, count_mdfc_lands)
+
+        if effective > land_cap and land_indices:
+            idx = pure_land_indices[0] if pure_land_indices else land_indices[0]
+            bottomed.append(remaining.pop(idx))
+            continue
+
+        gas_indices = [
+            i
+            for i, c in enumerate(remaining)
+            if c.cls in (_CardClass.OTHER, _CardClass.RAMP_SPELL) and c.cmc <= gas_cmc_threshold
+        ]
+        protected_idx = min(gas_indices, key=lambda i: remaining[i].cmc) if gas_indices else None
+
+        gas_like_indices = [
+            i
+            for i, c in enumerate(remaining)
+            if c.cls in (_CardClass.OTHER, _CardClass.RAMP_SPELL) and i != protected_idx
+        ]
+        if gas_like_indices:
+            idx = max(gas_like_indices, key=lambda i: remaining[i].cmc)
+            bottomed.append(remaining.pop(idx))
+            continue
+
+        ramp_indices = [
+            i for i, c in enumerate(remaining) if c.cls in (_CardClass.ROCK, _CardClass.DORK)
+        ]
+        if ramp_indices:
+            idx = max(ramp_indices, key=lambda i: remaining[i].cmc)
+            bottomed.append(remaining.pop(idx))
+            continue
+
+        if land_indices:
+            idx = land_indices[0]
+        elif protected_idx is not None:
+            idx = protected_idx
+        else:
+            idx = 0
+        bottomed.append(remaining.pop(idx))
+
+    return remaining, bottomed
+
+
+def _battlefield_pool(battlefield: list[tuple[_CardClass, int, int]], turn: int) -> int:
+    """Sum of active mana production on the battlefield during a given turn.
+
+    Lands, MDFC lands, and rocks produce starting the turn they are played;
+    dorks and ramp spells (summoning sickness / enters tapped) start
+    producing the following turn.
+    """
+    pool = 0
+    for cls, production, played_turn in battlefield:
+        if cls in (_CardClass.LAND, _CardClass.MDFC_LAND, _CardClass.ROCK):
+            if played_turn <= turn:
+                pool += production
+        elif played_turn < turn:
+            pool += production
+    return pool
+
+
+def _hand_development(hand: list[_Slot], *, count_mdfc_lands: bool) -> float:
+    """Mini-goldfish of the opening hand alone (no draws) across turns 1-3.
+
+    Mirrors the greedy land-drop and ramp-casting logic of ``_goldfish`` but
+    with no library draws, since the playability keep rule judges the hand
+    before it sees a mulligan decision. Returns the raw (uncast) mana pool
+    available on turn 3, before casting anything that turn -- a proxy for how
+    fast the hand develops, used by the playability keep rule.
+    """
+    remaining = list(hand)
+    battlefield: list[tuple[_CardClass, int, int]] = []
+
+    for turn in range(1, 4):
+        land_idx = next((i for i, c in enumerate(remaining) if c.cls == _CardClass.LAND), None)
+        if land_idx is None and count_mdfc_lands:
+            land_idx = next(
+                (i for i, c in enumerate(remaining) if c.cls == _CardClass.MDFC_LAND), None
+            )
+        if land_idx is not None:
+            played = remaining.pop(land_idx)
+            battlefield.append((played.cls, played.production, turn))
+
+        pool = _battlefield_pool(battlefield, turn)
+
+        if turn == 3:
+            return float(pool)
+
+        castable = sorted((c for c in remaining if c.cls in _RAMP_CLASSES), key=lambda c: c.cmc)
+        for card in castable:
+            if card.cmc > pool:
+                break
+            pool -= card.cmc
+            remaining.remove(card)
+            battlefield.append((card.cls, card.production, turn))
+            if card.cls == _CardClass.ROCK:
+                pool += card.production
+
+    raise AssertionError("unreachable: range(1, 4) always returns at turn == 3")
+
+
 def _goldfish(
     kept_hand: list[_Slot],
     library: list[_Slot],
@@ -356,13 +536,7 @@ def _goldfish(
             played = hand.pop(land_idx)
             battlefield.append((played.cls, played.production, turn))
 
-        pool = 0
-        for cls, production, played_turn in battlefield:
-            if cls in (_CardClass.LAND, _CardClass.MDFC_LAND, _CardClass.ROCK):
-                if played_turn <= turn:
-                    pool += production
-            elif played_turn < turn:
-                pool += production
+        pool = _battlefield_pool(battlefield, turn)
 
         castable = sorted((c for c in hand if c.cls in _RAMP_CLASSES), key=lambda c: c.cmc)
         for card in castable:
@@ -388,8 +562,18 @@ def _simulate_once(
     min_lands: int,
     max_lands: int,
     count_mdfc_lands: bool,
+    keep_rule: Literal["playability", "lands_v1"],
+    free_mulligan: bool,
+    gas_cmc_threshold: int,
 ) -> dict[str, Any]:
-    """Simulate one London-mulligan opening hand plus a 5-turn goldfish."""
+    """Simulate one London-mulligan opening hand plus a 5-turn goldfish.
+
+    ``free_mulligan`` applies the Commander free mulligan: the first
+    mulligan redraws a full 7 without bottoming, only the second and later
+    mulligans bottom a card. ``keep_rule`` selects between the playability
+    rule (hand development, flood, gas -- see :func:`_keep_playability`) and
+    the legacy lands-only rule (:func:`_keep_reason_lands_v1`).
+    """
     library = list(deck)
     rng.shuffle(library)
 
@@ -397,14 +581,39 @@ def _simulate_once(
     kept_hand: list[_Slot] = []
     rest: list[_Slot] = []
     bottomed: list[_Slot] = []
+    mull_reasons: list[str] = []
     while True:
         hand = library[:7]
         rest = library[7:]
-        kept_candidate, bottomed = _bottom_cards(hand, mulligans, count_mdfc_lands)
-        forced = mulligans >= 3
-        if forced or _keep(kept_candidate, min_lands, max_lands, count_mdfc_lands):
+        bottoms = max(0, mulligans - 1) if free_mulligan else mulligans
+        if keep_rule == "playability":
+            kept_candidate, bottomed = _bottom_cards_playability(
+                hand,
+                bottoms,
+                count_mdfc_lands=count_mdfc_lands,
+                max_lands=max_lands,
+                gas_cmc_threshold=gas_cmc_threshold,
+            )
+            keep_reason = _keep_playability(
+                kept_candidate,
+                min_lands=min_lands,
+                max_lands=max_lands,
+                count_mdfc_lands=count_mdfc_lands,
+                gas_cmc_threshold=gas_cmc_threshold,
+            )
+        else:
+            kept_candidate, bottomed = _bottom_cards(hand, bottoms, count_mdfc_lands)
+            keep_reason = _keep_reason_lands_v1(
+                kept_candidate,
+                min_lands=min_lands,
+                max_lands=max_lands,
+                count_mdfc_lands=count_mdfc_lands,
+            )
+        forced = bottoms >= 3
+        if forced or keep_reason is None:
             kept_hand = kept_candidate
             break
+        mull_reasons.append(keep_reason)
         # Mulligan again: shuffle the drawn hand back into the library (London mulligan).
         library = rest + hand
         rng.shuffle(library)
@@ -418,6 +627,8 @@ def _simulate_once(
         "effective_lands": _effective_lands(kept_hand, count_mdfc_lands),
         "spendable_by_turn": goldfish["spendable_by_turn"],
         "ramp_by_turn2": goldfish["ramp_by_turn2"],
+        "mulligans": mulligans,
+        "mull_reasons": mull_reasons,
     }
 
 
@@ -429,6 +640,9 @@ def _run_simulation(
     min_lands: int,
     max_lands: int,
     count_mdfc_lands: bool,
+    keep_rule: Literal["playability", "lands_v1"] = "playability",
+    free_mulligan: bool = True,
+    gas_cmc_threshold: int = 4,
 ) -> dict[str, Any]:
     """Run the Monte Carlo goldfish simulation ``iterations`` times and aggregate."""
     rng = random.Random(seed)
@@ -437,6 +651,8 @@ def _run_simulation(
     spendable_totals = [0.0] * 5
     on_curve_counts = [0] * 5
     ramp_by_turn2 = 0
+    mulligan_counts = {"0": 0, "1": 0, "2": 0, "3plus": 0}
+    mull_reason_counts = {"screw": 0, "flood": 0, "no_gas": 0}
 
     for _ in range(iterations):
         result = _simulate_once(
@@ -445,6 +661,9 @@ def _run_simulation(
             min_lands=min_lands,
             max_lands=max_lands,
             count_mdfc_lands=count_mdfc_lands,
+            keep_rule=keep_rule,
+            free_mulligan=free_mulligan,
+            gas_cmc_threshold=gas_cmc_threshold,
         )
         keep_counts[result["hand_size"]] += 1
         lands = result["effective_lands"]
@@ -456,6 +675,11 @@ def _run_simulation(
                 on_curve_counts[i] += 1
         if result["ramp_by_turn2"]:
             ramp_by_turn2 += 1
+        mulligans = result["mulligans"]
+        mulligan_key = str(mulligans) if mulligans < 3 else "3plus"
+        mulligan_counts[mulligan_key] += 1
+        for reason in result["mull_reasons"]:
+            mull_reason_counts[reason] += 1
 
     return {
         "keep_pct_by_hand_size": {size: count / iterations for size, count in keep_counts.items()},
@@ -465,6 +689,8 @@ def _run_simulation(
         "avg_spendable_mana_by_turn": {i + 1: spendable_totals[i] / iterations for i in range(5)},
         "on_curve_pct_by_turn": {i + 1: on_curve_counts[i] / iterations for i in range(5)},
         "ramp_by_turn2_pct": ramp_by_turn2 / iterations,
+        "keep_pct_by_mulligans": {k: v / iterations for k, v in mulligan_counts.items()},
+        "mull_reasons": mull_reason_counts,
     }
 
 
@@ -481,6 +707,9 @@ async def simulate_opening_hands(
     min_lands: int = 2,
     max_lands: int = 5,
     count_mdfc_lands: bool = True,
+    keep_rule: Literal["playability", "lands_v1"] = "playability",
+    free_mulligan: bool = True,
+    gas_cmc_threshold: int = 4,
     extra_mana_sources: list[str] | None = None,
     exclude_cards: list[str] | None = None,
     bulk: ScryfallBulkClient | None,
@@ -491,16 +720,28 @@ async def simulate_opening_hands(
     Resolves the decklist bulk-data-first, classifies each card as a land, MDFC
     land, mana rock, mana dork, land-fetch ramp spell, or other, then simulates
     London-mulligan opening hands and a greedy 5-turn goldfish to estimate keep
-    rates, kept-hand land distribution, and spendable mana per turn.
+    rates, kept-hand land distribution, and spendable mana per turn. The default
+    keep rule ("playability") judges a hand by a 3-turn goldfish of the hand
+    alone -- development speed, flood, and castable gas -- rather than lands
+    alone; the legacy lands-only rule is available as ``keep_rule="lands_v1"``.
 
     Args:
         decklist: Card entries, excluding the commander (a 99-card Commander
             library). Lands and spells both belong in this list.
         iterations: Number of simulated games (100-100000).
         seed: RNG seed for reproducible results. Omit for a random seed.
-        min_lands: Minimum effective lands to keep an opening hand.
+        min_lands: Minimum turn-3 mana pool (playability rule) or minimum
+            effective lands (lands_v1 rule) for a hand to avoid a "screw"
+            mulligan.
         max_lands: Maximum effective lands to keep an opening hand.
         count_mdfc_lands: Count modal-double-faced land backs as half a land.
+        keep_rule: "playability" (3-turn goldfish of the hand: development,
+            flood, gas) or "lands_v1" (legacy effective-land range only).
+        free_mulligan: Commander free mulligan -- the first mulligan redraws
+            a full 7 without bottoming a card; only the second and later
+            mulligans bottom one.
+        gas_cmc_threshold: A hand needs at least one non-land, non-ramp card
+            at or below this mana value to be kept under the playability rule.
         extra_mana_sources: Card names to force-classify as mana rocks (useful
             for cards this tool misclassifies or cannot resolve).
         exclude_cards: Card names to force-classify as non-mana (e.g. false
@@ -509,8 +750,7 @@ async def simulate_opening_hands(
         scryfall: Initialized ScryfallClient (fallback resolver).
 
     Returns:
-        WorkflowResult with markdown and structured data. The keep rule only
-        weighs lands (not rocks/dorks) -- a known v1 limitation.
+        WorkflowResult with markdown and structured data.
     """
     log.info("simulate_opening_hands.start", cards=len(decklist), iterations=iterations)
 
@@ -518,6 +758,10 @@ async def simulate_opening_hands(
         raise ValueError(f"iterations must be between 100 and 100000, got {iterations}")
     if min_lands > max_lands:
         raise ValueError(f"min_lands ({min_lands}) cannot exceed max_lands ({max_lands})")
+    if keep_rule not in ("playability", "lands_v1"):
+        raise ValueError(f"keep_rule must be 'playability' or 'lands_v1', got {keep_rule!r}")
+    if gas_cmc_threshold < 0:
+        raise ValueError(f"gas_cmc_threshold must be non-negative, got {gas_cmc_threshold}")
 
     slots, cards_by_name, unresolved = await _resolve_deck(decklist, bulk=bulk, scryfall=scryfall)
 
@@ -558,6 +802,9 @@ async def simulate_opening_hands(
         min_lands=min_lands,
         max_lands=max_lands,
         count_mdfc_lands=count_mdfc_lands,
+        keep_rule=keep_rule,
+        free_mulligan=free_mulligan,
+        gas_cmc_threshold=gas_cmc_threshold,
     )
 
     lines = [
@@ -566,6 +813,7 @@ async def simulate_opening_hands(
         f"**Simulating a {deck_size}-card library** (commander already excluded)",
         f"**Iterations:** {iterations}" + (f"  **Seed:** {seed}" if seed is not None else ""),
         f"**Land Range:** {min_lands}-{max_lands} effective lands to keep",
+        f"**Keep Rule:** {keep_rule}  **Free Mulligan:** {free_mulligan}",
         "",
         "## Keep Rates",
         "",
@@ -576,10 +824,41 @@ async def simulate_opening_hands(
         label = f"{size} (forced)" if size == 4 else str(size)
         lines.append(f"| {label} | {stats['keep_pct_by_hand_size'][size]:.1%} |")
     lines.append("")
+    lines.append("| Mulligans | Keep % |")
+    lines.append("|---|---|")
+    for mull_label in ("0", "1", "2", "3plus"):
+        lines.append(f"| {mull_label} | {stats['keep_pct_by_mulligans'][mull_label]:.1%} |")
+    lines.append("")
+    mull_reasons = stats["mull_reasons"]
+    lines.append(
+        f"- Mulled hands: {mull_reasons['screw']} screw, {mull_reasons['flood']} flood, "
+        f"{mull_reasons['no_gas']} no gas"
+    )
+    if keep_rule == "playability":
+        lines.append(
+            "- Playability rule: a hand is kept based on a 3-turn goldfish of the hand "
+            "alone (development speed, flood, and castable gas)."
+        )
+    else:
+        lines.append("- Legacy lands_v1 rule: a hand is kept based on effective land count only.")
+    lines.append(
+        "- Commander free mulligan: the first mulligan redraws a full 7 without bottoming a card."
+        if free_mulligan
+        else "- No free mulligan: every mulligan bottoms a card, including the first."
+    )
+    lines.append("")
 
     lines.append("## Kept Hand Land Distribution")
     lines.append("")
-    lines.append("*Only lands (not rocks/dorks) count toward the keep decision -- v1 limitation.*")
+    if keep_rule == "lands_v1":
+        lines.append(
+            "*Only lands (not rocks/dorks) count toward the keep decision -- v1 limitation.*"
+        )
+    else:
+        lines.append(
+            "*Land distribution of kept hands under the playability rule "
+            "(development/flood/gas, not lands alone).*"
+        )
     lines.append("")
     lines.append("| Effective Lands | % of Kept Hands |")
     lines.append("|---|---|")
@@ -640,6 +919,9 @@ async def simulate_opening_hands(
             "min_lands": min_lands,
             "max_lands": max_lands,
             "count_mdfc_lands": count_mdfc_lands,
+            "keep_rule": keep_rule,
+            "free_mulligan": free_mulligan,
+            "gas_cmc_threshold": gas_cmc_threshold,
             "extra_mana_sources": sorted(extra_set),
             "exclude_cards": sorted(exclude_set),
         },

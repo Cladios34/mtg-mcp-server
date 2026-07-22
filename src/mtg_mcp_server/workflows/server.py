@@ -1527,6 +1527,32 @@ async def simulate_opening_hands(
     count_mdfc_lands: Annotated[
         bool, Field(description="Count modal-double-faced land backs as half a land")
     ] = True,
+    keep_rule: Annotated[
+        Literal["playability", "lands_v1"],
+        Field(
+            description=(
+                "Keep rule: 'playability' (3-turn goldfish of the hand: development, "
+                "flood, gas) or 'lands_v1' (legacy effective-land range only)"
+            )
+        ),
+    ] = "playability",
+    free_mulligan: Annotated[
+        bool,
+        Field(
+            description=(
+                "Commander free mulligan: the first mulligan redraws 7 cards without bottoming"
+            )
+        ),
+    ] = True,
+    gas_cmc_threshold: Annotated[
+        int,
+        Field(
+            description=(
+                "A hand needs at least one non-source card at or below this mana "
+                "value to be kept (playability rule)"
+            )
+        ),
+    ] = 4,
     extra_mana_sources: Annotated[
         list[str] | None,
         Field(description="Card names to force-classify as mana rocks"),
@@ -1538,10 +1564,10 @@ async def simulate_opening_hands(
 ) -> ToolResult:
     """Monte Carlo simulation of opening hands, mulligans, and early mana curve.
 
-    Simulates London-mulligan opening hands and a greedy 5-turn goldfish to
-    estimate keep rates, kept-hand land distribution, and spendable mana per
-    turn. Exclude the commander from ``decklist``: it simulates a 99-card
-    Commander library.
+    Simulates Commander-free-mulligan opening hands and a greedy 5-turn
+    goldfish to estimate keep rates, kept-hand land distribution, and
+    spendable mana per turn. Exclude the commander from ``decklist``: it
+    simulates a 99-card Commander library.
     """
     from mtg_mcp_server.workflows.simulation import simulate_opening_hands as impl
 
@@ -1556,6 +1582,9 @@ async def simulate_opening_hands(
             min_lands=min_lands,
             max_lands=max_lands,
             count_mdfc_lands=count_mdfc_lands,
+            keep_rule=keep_rule,
+            free_mulligan=free_mulligan,
+            gas_cmc_threshold=gas_cmc_threshold,
             extra_mana_sources=extra_mana_sources,
             exclude_cards=exclude_cards,
             bulk=_bulk,
