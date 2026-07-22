@@ -128,7 +128,7 @@ async def mcp_client():
         )
 
         # --- 17Lands routes ---
-        respx.get(f"{SEVENTEEN_LANDS_BASE}/card_ratings/data").mock(
+        respx.get(f"{SEVENTEEN_LANDS_BASE}/api/card_data").mock(
             return_value=httpx.Response(
                 200, json=_load_json(SEVENTEEN_LANDS_FIXTURES / "card_ratings_lci.json")
             )

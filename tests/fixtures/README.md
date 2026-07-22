@@ -35,7 +35,7 @@ Captured JSON responses from real API calls, used by tests via `respx` mocking. 
 
 | File | Source Endpoint | Description |
 |------|-----------------|-------------|
-| `card_ratings_lci.json` | `GET /card_ratings/data?expansion=LCI` | Card ratings for Lost Caverns of Ixalan |
+| `card_ratings_lci.json` | `GET /api/card_data?expansion=LCI (ex /card_ratings/data, migré 2026-07)` | Card ratings for Lost Caverns of Ixalan |
 | `color_ratings_lci.json` | `GET /color_ratings/data?expansion=LCI` | Color pair archetype stats |
 
 ### `edhrec/`

@@ -29,7 +29,7 @@ class TestCardRatings:
         """Card ratings returns DraftCardRating models with win rate and draft metrics."""
         fixture = _load_fixture("card_ratings_lci.json")
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
+            f"{BASE_URL}/api/card_data",
             params={"expansion": "LCI", "event_type": "PremierDraft"},
         ).mock(return_value=httpx.Response(200, json=fixture))
 
@@ -51,7 +51,7 @@ class TestCardRatings:
         """Custom event_type parameter is forwarded to the API."""
         fixture = _load_fixture("card_ratings_lci.json")
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
+            f"{BASE_URL}/api/card_data",
             params={"expansion": "LCI", "event_type": "TradDraft"},
         ).mock(return_value=httpx.Response(200, json=fixture))
 
@@ -65,7 +65,7 @@ class TestCardRatings:
         """Lowercase set codes are uppercased before hitting the API (Bug 4)."""
         fixture = _load_fixture("card_ratings_lci.json")
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
+            f"{BASE_URL}/api/card_data",
             params={"expansion": "LCI", "event_type": "PremierDraft"},
         ).mock(return_value=httpx.Response(200, json=fixture))
 
@@ -75,21 +75,17 @@ class TestCardRatings:
         assert len(ratings) == 5
 
     @respx.mock
-    async def test_includes_default_date_range(self):
-        """card_ratings includes start_date and end_date so past formats return game data."""
+    async def test_uses_api_card_data_with_time_period(self):
+        """card_ratings hits /api/card_data with time_period (dates are gone upstream)."""
         fixture = _load_fixture("card_ratings_lci.json")
-        from mtg_mcp_server.services.seventeen_lands import (
-            _DEFAULT_END_DATE,
-            _DEFAULT_START_DATE,
-        )
+        from mtg_mcp_server.services.seventeen_lands import _CARD_DATA_TIME_PERIOD
 
         route = respx.get(
-            f"{BASE_URL}/card_ratings/data",
+            f"{BASE_URL}/api/card_data",
             params={
                 "expansion": "LCI",
                 "event_type": "PremierDraft",
-                "start_date": _DEFAULT_START_DATE,
-                "end_date": _DEFAULT_END_DATE,
+                "time_period": _CARD_DATA_TIME_PERIOD,
             },
         ).mock(return_value=httpx.Response(200, json=fixture))
 
@@ -100,10 +96,24 @@ class TestCardRatings:
         assert route.called
 
     @respx.mock
+    async def test_unwraps_data_envelope(self):
+        """The new endpoint wraps rows in {copyright, notes, data}."""
+        fixture = _load_fixture("card_ratings_lci.json")
+        wrapped = {"copyright": "17Lands", "notes": "", "data": fixture}
+        respx.get(f"{BASE_URL}/api/card_data").mock(
+            return_value=httpx.Response(200, json=wrapped)
+        )
+
+        async with SeventeenLandsClient(base_url=BASE_URL) as client:
+            ratings = await client.card_ratings("LCI")
+
+        assert len(ratings) == 5
+
+    @respx.mock
     async def test_empty_response(self):
         """Empty API response for unknown set returns an empty list."""
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
+            f"{BASE_URL}/api/card_data",
             params={"expansion": "FAKE", "event_type": "PremierDraft"},
         ).mock(return_value=httpx.Response(200, json=[]))
 
@@ -116,7 +126,7 @@ class TestCardRatings:
     async def test_server_error_raises(self):
         """500 response from card ratings raises SeventeenLandsError."""
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
+            f"{BASE_URL}/api/card_data",
             params={"expansion": "LCI", "event_type": "PremierDraft"},
         ).mock(return_value=httpx.Response(500, text="Internal Server Error"))
 

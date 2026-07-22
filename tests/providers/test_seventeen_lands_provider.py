@@ -36,7 +36,7 @@ class TestCardRatings:
         """card_ratings returns formatted card list with GIH WR, ALSA, and attribution."""
         fixture = _load_fixture("card_ratings_lci.json")
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
+            f"{BASE_URL}/api/card_data",
             params={"expansion": "LCI", "event_type": "PremierDraft"},
         ).mock(return_value=httpx.Response(200, json=fixture))
 
@@ -77,7 +77,7 @@ class TestCardRatings:
         """card_ratings respects limit parameter."""
         fixture = _load_fixture("card_ratings_lci.json")
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
+            f"{BASE_URL}/api/card_data",
             params={"expansion": "LCI", "event_type": "PremierDraft"},
         ).mock(return_value=httpx.Response(200, json=fixture))
 
@@ -92,7 +92,7 @@ class TestCardRatings:
         """card_ratings with limit=0 returns all cards."""
         fixture = _load_fixture("card_ratings_lci.json")
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
+            f"{BASE_URL}/api/card_data",
             params={"expansion": "LCI", "event_type": "PremierDraft"},
         ).mock(return_value=httpx.Response(200, json=fixture))
 
@@ -106,7 +106,7 @@ class TestCardRatings:
         """card_ratings sorts alphabetically when sort_by=name."""
         fixture = _load_fixture("card_ratings_lci.json")
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
+            f"{BASE_URL}/api/card_data",
             params={"expansion": "LCI", "event_type": "PremierDraft"},
         ).mock(return_value=httpx.Response(200, json=fixture))
 
@@ -122,7 +122,7 @@ class TestCardRatings:
         """card_ratings sorts by ALSA ascending (lowest first)."""
         fixture = _load_fixture("card_ratings_lci.json")
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
+            f"{BASE_URL}/api/card_data",
             params={"expansion": "LCI", "event_type": "PremierDraft"},
         ).mock(return_value=httpx.Response(200, json=fixture))
 
@@ -138,7 +138,7 @@ class TestCardRatings:
         """card_ratings sorts by IWD descending (highest first)."""
         fixture = _load_fixture("card_ratings_lci.json")
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
+            f"{BASE_URL}/api/card_data",
             params={"expansion": "LCI", "event_type": "PremierDraft"},
         ).mock(return_value=httpx.Response(200, json=fixture))
 
@@ -154,7 +154,7 @@ class TestCardRatings:
         """card_ratings raises ToolError for invalid sort_by values."""
         fixture = _load_fixture("card_ratings_lci.json")
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
+            f"{BASE_URL}/api/card_data",
             params={"expansion": "LCI", "event_type": "PremierDraft"},
         ).mock(return_value=httpx.Response(200, json=fixture))
 
@@ -169,7 +169,7 @@ class TestCardRatings:
         """card_ratings raises ToolError for negative limit."""
         fixture = _load_fixture("card_ratings_lci.json")
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
+            f"{BASE_URL}/api/card_data",
             params={"expansion": "LCI", "event_type": "PremierDraft"},
         ).mock(return_value=httpx.Response(200, json=fixture))
 
@@ -184,7 +184,7 @@ class TestCardRatings:
         """card_ratings concise format shows only name and GIH WR."""
         fixture = _load_fixture("card_ratings_lci.json")
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
+            f"{BASE_URL}/api/card_data",
             params={"expansion": "LCI", "event_type": "PremierDraft"},
         ).mock(return_value=httpx.Response(200, json=fixture))
 
@@ -202,7 +202,7 @@ class TestCardRatings:
     async def test_empty_results(self, client: Client):
         """card_ratings returns a 'no data' message for unknown set codes."""
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
+            f"{BASE_URL}/api/card_data",
             params={"expansion": "FAKE", "event_type": "PremierDraft"},
         ).mock(return_value=httpx.Response(200, json=[]))
 
@@ -220,7 +220,7 @@ class TestCardRatings:
     async def test_server_error_returns_tool_error(self, client: Client):
         """card_ratings returns an error response on server failure."""
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
+            f"{BASE_URL}/api/card_data",
             params={"expansion": "LCI", "event_type": "PremierDraft"},
         ).mock(return_value=httpx.Response(500, text="Internal Server Error"))
 
