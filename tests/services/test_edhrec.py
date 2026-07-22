@@ -292,3 +292,33 @@ class TestServerErrors:
         async with EDHRECClient(base_url=BASE_URL) as client:
             with pytest.raises(EDHRECError):
                 await client.commander_top_cards("Muldrotha, the Gravetide")
+
+
+class TestTotalDecksCurrentSchema:
+    """The deck counter moved to container.json_dict.card.num_decks (2026-07)."""
+
+    def test_total_decks_from_json_dict_card(self):
+        """Current pages carry the count under json_dict.card, not the root."""
+        from mtg_mcp_server.services.edhrec import EDHRECClient
+
+        client = EDHRECClient.__new__(EDHRECClient)
+        data = {
+            "header": "Satya, Aetherflux Genius (Commander)",
+            "container": {
+                "json_dict": {
+                    "card": {"num_decks": 15022},
+                    "cardlists": [],
+                }
+            },
+        }
+        result = client._parse_commander_data(data, "Satya, Aetherflux Genius")
+        assert result.total_decks == 15022
+
+    def test_total_decks_legacy_field_still_honored(self):
+        """Old-shape payloads with a root num_decks_avg keep working."""
+        from mtg_mcp_server.services.edhrec import EDHRECClient
+
+        client = EDHRECClient.__new__(EDHRECClient)
+        data = {"header": "X (Commander)", "num_decks_avg": 19741, "container": {"json_dict": {"cardlists": []}}}
+        result = client._parse_commander_data(data, "X")
+        assert result.total_decks == 19741

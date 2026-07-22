@@ -174,12 +174,25 @@ class EDHRECClient(BaseClient):
         if header.endswith(" (Commander)"):
             header = header[: -len(" (Commander)")]
 
-        raw_total = data.get("num_decks_avg", 0)
-        total_decks = int(raw_total) if isinstance(raw_total, (int, float)) else 0
-
         # Navigate: data -> container -> json_dict -> cardlists
         container = data.get("container")
         json_dict = container.get("json_dict") if isinstance(container, dict) else None
+
+        # Total deck count. The historical top-level ``num_decks_avg`` field is
+        # gone from current responses (observed 2026-07-22: Satya page has the
+        # count at container.json_dict.card.num_decks = 15022 while the top
+        # level has no counter at all, which silently yielded 0). Try the
+        # current location first, then the legacy field.
+        total_decks = 0
+        if isinstance(json_dict, dict):
+            card_info = json_dict.get("card")
+            if isinstance(card_info, dict):
+                raw = card_info.get("num_decks", 0)
+                if isinstance(raw, (int, float)):
+                    total_decks = int(raw)
+        if total_decks == 0:
+            raw_total = data.get("num_decks_avg", 0)
+            total_decks = int(raw_total) if isinstance(raw_total, (int, float)) else 0
         raw_cardlists = json_dict.get("cardlists", []) if isinstance(json_dict, dict) else []
         if not isinstance(raw_cardlists, list):
             raw_cardlists = []
