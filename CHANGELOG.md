@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `simulate_opening_hands` -- Opening-hand simulation: keep rates, mulligans, net mana per turn, reproducible via `seed` (2026-07-22)
+- `hand_probability` -- Exact hypergeometric probability for card-category counts in opening hands (2026-07-22)
+
+### Fixed
+- `complete_deck`: the `commander` parameter is now actually consumed -- suggestions are filtered to the commander's color identity (was accepted-but-unused; green cards were suggested for Mardu decks) (2026-07-22)
+- `complete_deck`: multi-role card classification -- a creature that draws counts as both `creatures` and `card_draw`; mana rocks whose oracle text lacks "mana"/"land" (Sol Ring, signets, talismans) now count as ramp; removal patterns narrowed (damage-doubling text no longer classified as removal); Vilis-style "draw that many cards" and self-recursion recognized as card advantage. Kills phantom gap reports (2026-07-22)
+- 17Lands card ratings migrated to `/api/card_data` (old endpoint answered 200 with zeroed aggregates) (2026-07-22)
+- EDHREC deck count read from `container.json_dict.card.num_decks` (was silently 0) (2026-07-22)
+- Bracket validators hardened after adversarial review; `BracketEstimate` aligned with current `/estimate-bracket` schema; configurable Moxfield User-Agent (2026-07-22)
+
+### Known limitations
+- Spellbook decklist tools (`spellbook_estimate_bracket`, `spellbook_find_decklist_combos`) silently skip lines prefixed with a quantity ("1 Card Name") -- pass bare card names. `deck_validate` accepts both formats.
+- `complete_deck` category heuristics remain text-based: exile-draw engines (Necropotence), tutors and Land Tax are not counted as card draw; Commander ratios (20+ creatures, 8+ draw) are generic guidelines, not per-deck doctrine.
+
 ## [3.0.0] - 2026-04-03
 
 v3.0.0 marks the constructed metagame milestone. The server now covers all major
