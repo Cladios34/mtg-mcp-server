@@ -451,7 +451,7 @@ def _format_output(
     lines.append("## Combos & Bracket")
     lines.append("")
     if bracket is not None:
-        lines.append(f"**Bracket:** {bracket.bracket_tag or 'Unknown'}")
+        lines.append(f"**Bracket:** {bracket.bracket_tag or 'Unknown'}" if bracket.bracket_tag_name in (None, bracket.bracket_tag) else f"**Bracket:** {bracket.bracket_tag} ({bracket.bracket_tag_name})")
     else:
         lines.append("**Bracket:** Unknown (Spellbook unavailable)")
 

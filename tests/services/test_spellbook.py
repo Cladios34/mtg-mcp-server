@@ -249,6 +249,47 @@ class TestEstimateBracket:
         assert "Demonic Consultation" in result.two_card_combos[0]
         assert result.lock_combos == ["Zethi, Arcane Blademaster + Teferi's Protection"]
 
+    def test_uses_null_does_not_crash(self):
+        """A combo with ``"uses": null`` degrades to an id-only description."""
+        data = {
+            "bracketTag": "R",
+            "cards": [],
+            "combos": [
+                {
+                    "combo": {"id": "742-129", "uses": None},
+                    "definitelyTwoCard": True,
+                }
+            ],
+        }
+        result = BracketEstimate.model_validate(data)
+        assert result.two_card_combos == ["742-129"]
+
+    def test_mass_land_denial_and_extra_turn_flags(self):
+        """massLandDenial / extraTurn card flags feed the derived lists."""
+        data = {
+            "bracketTag": "R",
+            "cards": [
+                {
+                    "card": {"id": 1, "name": "Armageddon"},
+                    "banned": False,
+                    "gameChanger": False,
+                    "massLandDenial": True,
+                    "extraTurn": False,
+                },
+                {
+                    "card": {"id": 2, "name": "Time Warp"},
+                    "banned": False,
+                    "gameChanger": False,
+                    "massLandDenial": False,
+                    "extraTurn": True,
+                },
+            ],
+            "combos": [],
+        }
+        result = BracketEstimate.model_validate(data)
+        assert result.mass_land_denial_cards == ["Armageddon"]
+        assert result.extra_turn_cards == ["Time Warp"]
+
     def test_empty_response_yields_empty_lists(self):
         """A minimal payload still validates, with empty derived lists."""
         result = BracketEstimate.model_validate({"bracketTag": "C"})

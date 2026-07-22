@@ -46,12 +46,20 @@ def _make_card(
 
 def _make_bracket() -> BracketEstimate:
     """Build a bracket estimate with tag E and one two-card combo."""
-    return BracketEstimate(
-        bracketTag="E",
-        bannedCards=[],
-        gameChangerCards=[],
-        twoCardCombos=["combo1"],
-        lockCombos=[],
+    return BracketEstimate.model_validate(
+        {
+            "bracketTag": "E",
+            "cards": [],
+            "combos": [
+                {
+                    "combo": {
+                        "id": "combo1",
+                        "uses": [{"card": {"id": 1, "name": "combo1"}}],
+                    },
+                    "definitelyTwoCard": True,
+                }
+            ],
+        }
     )
 
 

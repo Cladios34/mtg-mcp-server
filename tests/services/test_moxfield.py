@@ -657,3 +657,21 @@ class TestSearchCaching:
             await client.search_decks(fmt="modern")
 
         assert route.call_count == 2
+
+
+class TestMoxfieldUserAgentSetting:
+    """MTG_MCP_MOXFIELD_USER_AGENT reaches the Settings model."""
+
+    def test_env_override(self, monkeypatch):
+        """The env var populates settings.moxfield_user_agent."""
+        from mtg_mcp_server.config import Settings
+
+        monkeypatch.setenv("MTG_MCP_MOXFIELD_USER_AGENT", "custom-agent/1.0")
+        assert Settings().moxfield_user_agent == "custom-agent/1.0"
+
+    def test_default_is_empty(self, monkeypatch):
+        """Without the env var the override stays empty (library default UA)."""
+        from mtg_mcp_server.config import Settings
+
+        monkeypatch.delenv("MTG_MCP_MOXFIELD_USER_AGENT", raising=False)
+        assert Settings().moxfield_user_agent == ""

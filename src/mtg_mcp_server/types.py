@@ -18,7 +18,7 @@ Backends:
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 __all__ = [
     "ArchetypeRating",
@@ -261,8 +261,11 @@ class ClassifiedCard(BaseModel):
     @classmethod
     def _flatten_card(cls, data: object) -> object:
         """Lift ``{"card": {"name": ...}, ...flags}`` payloads to a flat ``name``."""
-        if isinstance(data, dict) and isinstance(data.get("card"), dict):
-            data = {**data, "name": data["card"].get("name", "")}
+        if not isinstance(data, dict):
+            return data
+        card = data.get("card")
+        if isinstance(card, dict):
+            data = {**data, "name": card.get("name") or ""}
         return data
 
 
@@ -288,14 +291,21 @@ class ClassifiedCombo(BaseModel):
     @classmethod
     def _flatten_combo(cls, data: object) -> object:
         """Lift ``{"combo": {"id", "uses": [{"card": ...}]}, ...flags}`` payloads."""
-        if isinstance(data, dict) and isinstance(data.get("combo"), dict):
-            combo = data["combo"]
-            names = [
-                u["card"].get("name", "?")
-                for u in combo.get("uses", [])
-                if isinstance(u, dict) and isinstance(u.get("card"), dict)
-            ]
-            data = {**data, "id": str(combo.get("id", "")), "card_names": names}
+        if not isinstance(data, dict):
+            return data
+        combo = data.get("combo")
+        if isinstance(combo, dict):
+            uses = combo.get("uses") or []
+            names: list[str] = []
+            if isinstance(uses, list):
+                for entry in uses:
+                    if not isinstance(entry, dict):
+                        continue
+                    card = entry.get("card")
+                    if isinstance(card, dict):
+                        name = card.get("name")
+                        names.append(name if isinstance(name, str) and name else "?")
+            data = {**data, "id": str(combo.get("id") or ""), "card_names": names}
         return data
 
     @property

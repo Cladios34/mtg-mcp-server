@@ -135,7 +135,7 @@ Returns: Single combo variant object.
 }
 ```
 Also accepts plain-text decklist format with `// Commander` section headers.
-Returns: Bracket-relevant combo information with fields: `bracketTag`, `bannedCards`, `gameChangerCards`, `massLandDenialCards`, `massLandDenialTemplates`, `massLandDenialCombos`, `extraTurnCards`, `extraTurnTemplates`, `extraTurnsCombos`, `lockCombos`, `controlAllOpponentsCombos`, `controlSomeOpponentsCombos`, `skipTurnsCombos`, `twoCardCombos`.
+Returns: `bracketTag` (Spellbook scale: E/C/O/P/S/R/B), `cards` (each with `banned`, `gameChanger`, `massLandDenial`, `extraTurn` flags), `templates`, and `combos` (each with two-card/lock/extra-turn classifications). Legacy root lists (`bannedCards`, `gameChangerCards`, `twoCardCombos`, `lockCombos`) no longer exist upstream; the client recomputes them from the per-item flags.
 
 **POST `/find-my-combos`** — Find combos in a decklist
 Same request body format as `/estimate-bracket`. Returns combos categorized as `included`, `almostIncluded`, `almostIncludedByAddingColors`. Very useful for workflow tools like `suggest_cuts` and `evaluate_upgrade`.
