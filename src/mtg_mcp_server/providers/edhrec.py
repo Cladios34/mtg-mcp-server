@@ -105,7 +105,13 @@ async def commander_staples(
         cards = cardlist.cardviews if limit == 0 else cardlist.cardviews[:limit]
         lines.append(f"\n### {cardlist.header}")
         for card in cards:
-            pct = _inclusion_pct(card.num_decks, data.total_decks)
+            # Prefer the per-card denominator. ``total_decks`` is a single
+            # commander-level counter that already went silently to 0 once when
+            # EDHREC moved it (fixed in 46c229f); if it drifts again, every card
+            # here would read "0% of decks" while ``potential_decks`` is still
+            # present and correct on the very same payload. Fall back to
+            # ``total_decks`` only when the per-card value is missing.
+            pct = _inclusion_pct(card.num_decks, card.potential_decks or data.total_decks)
             synergy_str = f"+{card.synergy:.0%}" if card.synergy >= 0 else f"{card.synergy:.0%}"
             if response_format == "concise":
                 lines.append(f"  {card.name} — synergy: {synergy_str}")

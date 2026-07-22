@@ -68,6 +68,30 @@ class TestCommanderStaples:
         assert "label" not in card
 
     @respx.mock
+    async def test_inclusion_survives_commander_counter_drift(self, client: Client):
+        """Inclusion% uses the per-card denominator, not the commander-level counter.
+
+        Regression guard for the EDHREC schema-drift family: the commander-level
+        deck counter already vanished once (fixed in 46c229f). If it drifts to 0
+        again, every card must still report its real inclusion rate from
+        ``potential_decks``, which lives on the same payload, instead of 0%.
+        """
+        fixture = _load_fixture("commander_muldrotha.json")
+        # Wipe every commander-level counter, keep the per-card ones intact.
+        fixture.pop("num_decks_avg", None)
+        fixture["container"]["json_dict"].pop("card", None)
+        respx.get(f"{BASE_URL}/pages/commanders/muldrotha-the-gravetide.json").mock(
+            return_value=httpx.Response(200, json=fixture)
+        )
+
+        result = await client.call_tool(
+            "commander_staples", {"commander_name": "Muldrotha, the Gravetide"}
+        )
+        text = result.content[0].text
+        assert "0 decks" in text  # commander counter is genuinely unknown
+        assert "in 0% of decks" not in text  # but per-card rates must survive
+
+    @respx.mock
     async def test_category_filter(self, client: Client):
         """commander_staples filters results to a single card category when specified."""
         fixture = _load_fixture("commander_muldrotha.json")
