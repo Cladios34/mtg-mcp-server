@@ -588,7 +588,19 @@ _COMMANDER_RATIOS: dict[str, tuple[int, int]] = {
 }
 
 
-_DRAW_PATTERNS = ["draw a card", "draw cards", "draw two", "draw three", "draw four", "draw x cards"]
+_DRAW_PATTERNS = [
+    "draw a card",
+    "draw cards",
+    "draw two",
+    "draw three",
+    "draw four",
+    "draw x cards",
+    "draw that many cards",  # Vilis-style: "Whenever you lose life, draw that many cards."
+    "you draw",  # "you draw four cards", "you may draw..." — still self-referential
+]
+# NOTE: a bare "draws a card" is deliberately absent — it would classify
+# opponent-draw punishers ("Whenever an opponent draws a card...", Smothering
+# Tithe) as card draw.
 # Deliberately narrower than a bare "deals"/"damage to" (which matched almost any
 # red card, e.g. Gisela's damage-doubling text): only targeted/mass answers count.
 _REMOVAL_PATTERNS = [

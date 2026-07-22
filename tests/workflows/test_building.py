@@ -728,9 +728,27 @@ class TestCompleteDeck:
             ),
         )
 
+        # Real Vilis wording, which none of the simple "draw a card" patterns match
+        vilis_real = _mock_card(
+            "Vilis, Broker of Blood (real wording)",
+            type_line="Legendary Creature - Demon",
+            oracle_text="Whenever you lose life, draw that many cards.",
+        )
+        # Opponent-draw punishers must NOT count as card draw
+        tithe = _mock_card(
+            "Smothering Tithe",
+            type_line="Enchantment",
+            oracle_text=(
+                "Whenever an opponent draws a card, that player may pay {2}. "
+                "If the player doesn't, you create a Treasure token."
+            ),
+        )
+
         assert _card_roles(vilis) == ["creatures", "card_draw"]
+        assert _card_roles(vilis_real) == ["creatures", "card_draw"]
         assert _card_roles(bolt) == ["removal"]
         assert _card_roles(gisela) == ["creatures"]
+        assert "card_draw" not in _card_roles(tithe)
 
     async def test_multi_role_prevents_phantom_gaps(self, mock_bulk: AsyncMock) -> None:
         """Creatures that draw count toward BOTH ratios in gap analysis."""
