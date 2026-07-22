@@ -588,38 +588,73 @@ _COMMANDER_RATIOS: dict[str, tuple[int, int]] = {
 }
 
 
-def _categorize_card(card: Card) -> str:
-    """Categorize a card by its primary role."""
+_DRAW_PATTERNS = ["draw a card", "draw cards", "draw two", "draw three", "draw four", "draw x cards"]
+# Deliberately narrower than a bare "deals"/"damage to" (which matched almost any
+# red card, e.g. Gisela's damage-doubling text): only targeted/mass answers count.
+_REMOVAL_PATTERNS = [
+    "destroy target",
+    "exile target",
+    "destroy all",
+    "exile all",
+    "destroy each",
+    "damage to any target",
+    "damage to target",
+    "damage to each creature",
+]
+
+
+def _card_roles(card: Card) -> list[str]:
+    """Functional roles of a card (a card can fill several at once).
+
+    Commander deckbuilding counts categories with overlap: a creature that
+    draws cards is BOTH a creature and card draw. Single-role classification
+    (measured 2026-07-22) reported creatures=12/card_draw=2 on a deck with 16
+    creatures and 12 real draw sources, announcing phantom gaps.
+
+    The first role is the primary one (used where a single label is needed).
+    Structural types (spells/enchantments/artifacts...) are only used as a
+    fallback when no functional role matches.
+    """
     type_lower = card.type_line.lower()
     oracle_lower = (card.oracle_text or "").lower()
 
     if "land" in type_lower and "creature" not in type_lower:
-        return "lands"
+        return ["lands"]
+
+    roles: list[str] = []
+    if "creature" in type_lower:
+        roles.append("creatures")
     # Mana rocks/dorks (Sol Ring, signets, talismans, Mana Vault...): their oracle
     # text often reads just "{T}: Add {C}." without the words "mana" or "land",
     # so the generic ramp check below silently misses them (measured 2026-07-22:
     # a Commander deck with 11 rocks reported ramp=3).
     if "{t}: add {" in oracle_lower or "{t}: add one mana" in oracle_lower:
-        return "ramp"
-    if any(t in oracle_lower for t in ["add {", "add one mana", "search your library for a"]) and (
-        "land" in oracle_lower or "mana" in oracle_lower
-    ):
-        return "ramp"
-    if any(t in oracle_lower for t in ["draw a card", "draw cards", "draw two", "draw three"]):
-        return "card_draw"
-    if any(t in oracle_lower for t in ["destroy target", "exile target", "deals", "damage to"]):
-        return "removal"
-    if "creature" in type_lower:
-        return "creatures"
+        roles.append("ramp")
+    elif any(
+        t in oracle_lower for t in ["add {", "add one mana", "search your library for a"]
+    ) and ("land" in oracle_lower or "mana" in oracle_lower):
+        roles.append("ramp")
+    if any(t in oracle_lower for t in _DRAW_PATTERNS):
+        roles.append("card_draw")
+    if any(t in oracle_lower for t in _REMOVAL_PATTERNS):
+        roles.append("removal")
+    if roles:
+        return roles
+
     if "instant" in type_lower or "sorcery" in type_lower:
-        return "spells"
+        return ["spells"]
     if "enchantment" in type_lower:
-        return "enchantments"
+        return ["enchantments"]
     if "artifact" in type_lower:
-        return "artifacts"
+        return ["artifacts"]
     if "planeswalker" in type_lower:
-        return "planeswalkers"
-    return "other"
+        return ["planeswalkers"]
+    return ["other"]
+
+
+def _categorize_card(card: Card) -> str:
+    """Primary role of a card (first functional role, kept for compatibility)."""
+    return _card_roles(card)[0]
 
 
 async def complete_deck(
@@ -680,10 +715,14 @@ async def complete_deck(
     if on_progress is not None:
         await on_progress(2, total_steps)
 
+    # Multi-role counting: a card contributes to every functional category it
+    # fills (creature that draws = creatures AND card_draw), so category totals
+    # can exceed deck size — that mirrors how Commander ratios are meant to be
+    # read and prevents phantom gaps.
     categories: dict[str, list[Card]] = {}
     for card in resolved:
-        cat = _categorize_card(card)
-        categories.setdefault(cat, []).append(card)
+        for cat in _card_roles(card):
+            categories.setdefault(cat, []).append(card)
 
     target_size = _TARGET_SIZES.get(format.lower(), 60)
     cards_needed = max(0, target_size - len(resolved))

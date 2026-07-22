@@ -698,6 +698,63 @@ class TestCompleteDeck:
         assert _categorize_card(arcane) == "ramp"
         assert _categorize_card(whip) != "ramp"
 
+    async def test_multi_role_counting(self, mock_bulk: AsyncMock) -> None:
+        """A card fills every functional role it matches, not just the first.
+
+        Regression test (2026-07-22): single-role classification reported
+        creatures=12/card_draw=2 on a deck with 16 creatures and 12 real draw
+        sources, announcing phantom 'creatures' and 'card_draw' gaps.
+        """
+        from mtg_mcp_server.workflows.building import _card_roles
+
+        vilis = _mock_card(
+            "Vilis, Broker of Blood",
+            type_line="Legendary Creature - Demon",
+            oracle_text="Whenever you lose life, draw a card for each 1 life you lost.",
+        )
+        bolt = _mock_card(
+            "Lightning Bolt",
+            type_line="Instant",
+            oracle_text="Lightning Bolt deals 3 damage to any target.",
+        )
+        # Damage-doubling text must NOT count as removal (old bare "deals"
+        # pattern classified Gisela as removal instead of a creature).
+        gisela = _mock_card(
+            "Gisela, Blade of Goldnight",
+            type_line="Legendary Creature - Angel",
+            oracle_text=(
+                "If a source would deal damage to an opponent, it deals double "
+                "that damage instead."
+            ),
+        )
+
+        assert _card_roles(vilis) == ["creatures", "card_draw"]
+        assert _card_roles(bolt) == ["removal"]
+        assert _card_roles(gisela) == ["creatures"]
+
+    async def test_multi_role_prevents_phantom_gaps(self, mock_bulk: AsyncMock) -> None:
+        """Creatures that draw count toward BOTH ratios in gap analysis."""
+        cards = {
+            f"Reader {i}": _mock_card(
+                f"Reader {i}",
+                type_line="Creature - Human Advisor",
+                oracle_text="When this creature enters, draw a card.",
+            )
+            for i in range(20)
+        }
+        mock_bulk.get_cards = AsyncMock(return_value=cards)
+        mock_bulk.filter_cards = AsyncMock(return_value=[])
+
+        result = await complete_deck(
+            list(cards.keys()),
+            "commander",
+            bulk=mock_bulk,
+        )
+
+        gaps = result.data["gaps"]
+        assert "creatures" not in gaps  # 20 creatures >= ratio floor of 20
+        assert "card_draw" not in gaps  # the same 20 cards also draw (floor 8)
+
     async def test_progress_reporting(self, mock_bulk: AsyncMock) -> None:
         """Progress callback is invoked during processing."""
         cards = {f"Card {i}": _mock_card(f"Card {i}") for i in range(5)}
