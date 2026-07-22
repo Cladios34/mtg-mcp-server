@@ -66,6 +66,8 @@ mcp = FastMCP(
         "- suggest_cuts: Identify weakest cards to cut\n"
         "- deck_validate: Validate a decklist against format rules\n"
         "- suggest_mana_base: Suggest lands for a decklist\n"
+        "- hand_probability: Exact hypergeometric draw odds for a card category\n"
+        "- simulate_opening_hands: Monte Carlo opening hand and mana curve simulation\n"
         "- price_comparison: Compare card prices side-by-side\n"
         "- metagame_snapshot: Current metagame breakdown with tier assignment\n"
         "- archetype_decklist: Stock decklist for a competitive archetype\n"

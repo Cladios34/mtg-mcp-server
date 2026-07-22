@@ -1,0 +1,647 @@
+"""Deck simulation workflows -- hypergeometric draw odds and opening hand Monte Carlo.
+
+Pure async functions with no MCP awareness. ``hand_probability`` is a closed-form
+calculation with no client dependency. ``simulate_opening_hands`` resolves a decklist
+bulk-data-first, classifies each card into a mana-simulation category, then runs a
+Monte Carlo goldfish simulation (London mulligan, greedy ramp casting) to estimate
+keep rates, land distribution, and mana curve. The workflow server (``server.py``)
+registers both as MCP tools and handles ToolError conversion.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import enum
+import math
+import random
+import re
+from typing import TYPE_CHECKING, Any, NamedTuple
+
+import structlog
+
+from mtg_mcp_server.utils.decklist import parse_decklist
+from mtg_mcp_server.workflows import WorkflowResult
+
+if TYPE_CHECKING:
+    from mtg_mcp_server.services.scryfall import ScryfallClient
+    from mtg_mcp_server.services.scryfall_bulk import ScryfallBulkClient
+    from mtg_mcp_server.types import Card
+
+log = structlog.get_logger(service="workflow.simulation")
+
+_MANA_SYMBOL_RE = re.compile(r"\{[WUBRGC]\}")
+_RAMP_SPELL_RE = re.compile(
+    r"search your library for .{0,60}land .{0,80}onto the battlefield",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+# ---------------------------------------------------------------------------
+# Hypergeometric probability (hand_probability tool)
+# ---------------------------------------------------------------------------
+
+
+def _hypergeom_pmf(population: int, successes: int, draws: int, observed: int) -> float:
+    """Hypergeometric PMF: P(exactly ``observed`` successes in ``draws`` draws).
+
+    ``population`` = N (deck size), ``successes`` = K (matching cards),
+    ``draws`` = n (cards seen), ``observed`` = k.
+    """
+    if observed < 0 or observed > successes:
+        return 0.0
+    other_draws = draws - observed
+    if other_draws < 0 or other_draws > population - successes:
+        return 0.0
+    return (
+        math.comb(successes, observed)
+        * math.comb(population - successes, other_draws)
+        / math.comb(population, draws)
+    )
+
+
+async def hand_probability(
+    deck_size: int = 99,
+    copies: int = 1,
+    cards_seen: int = 7,
+    min_count: int = 1,
+    max_count: int | None = None,
+) -> WorkflowResult:
+    """Compute the exact hypergeometric probability of seeing a card category.
+
+    Answers questions like "what are the odds I've seen at least 1 of my 3
+    tutors by turn 4?" via the closed-form hypergeometric distribution -- no
+    simulation involved.
+
+    Args:
+        deck_size: Total cards in the library (N). Defaults to 99 (Commander).
+        copies: Number of matching cards in the deck (K).
+        cards_seen: Cards drawn/seen so far (n). Defaults to 7 (opening hand).
+        min_count: Minimum matching cards to count as a hit (inclusive).
+        max_count: Maximum matching cards to count as a hit (inclusive).
+            Defaults to the largest possible count (``min(cards_seen, copies)``).
+
+    Returns:
+        WorkflowResult with a PMF table and the requested cumulative probability.
+    """
+    log.info("hand_probability.start", deck_size=deck_size, copies=copies, cards_seen=cards_seen)
+
+    for label, value in (
+        ("deck_size", deck_size),
+        ("copies", copies),
+        ("cards_seen", cards_seen),
+        ("min_count", min_count),
+    ):
+        if value < 0:
+            raise ValueError(f"{label} must be non-negative, got {value}")
+    if max_count is not None and max_count < 0:
+        raise ValueError(f"max_count must be non-negative, got {max_count}")
+    if copies > deck_size:
+        raise ValueError(f"copies ({copies}) cannot exceed deck_size ({deck_size})")
+    if cards_seen > deck_size:
+        raise ValueError(f"cards_seen ({cards_seen}) cannot exceed deck_size ({deck_size})")
+    if max_count is not None and max_count < min_count:
+        raise ValueError(f"max_count ({max_count}) cannot be less than min_count ({min_count})")
+
+    upper = min(max_count if max_count is not None else cards_seen, cards_seen, copies)
+    pmf_range = range(0, min(cards_seen, copies) + 1)
+    pmf = {k: _hypergeom_pmf(deck_size, copies, cards_seen, k) for k in pmf_range}
+    probability = sum(p for k, p in pmf.items() if min_count <= k <= upper)
+    expectation = (cards_seen * copies / deck_size) if deck_size else 0.0
+
+    lines = [
+        "# Hypergeometric Draw Probability",
+        "",
+        f"**Deck Size:** {deck_size}  **Copies:** {copies}  **Cards Seen:** {cards_seen}",
+        f"**Expectation:** {expectation:.2f} copies seen on average",
+        "",
+        "## Probability Mass Function",
+        "",
+        "| Copies Seen (k) | Probability |",
+        "|---|---|",
+    ]
+    for k in sorted(pmf):
+        lines.append(f"| {k} | {pmf[k]:.2%} |")
+    lines.append("")
+    lines.append(f"**P({min_count} <= copies seen <= {upper}):** {probability:.2%}")
+
+    log.info("hand_probability.complete", probability=probability)
+    data: dict[str, object] = {
+        "deck_size": deck_size,
+        "copies": copies,
+        "cards_seen": cards_seen,
+        "min_count": min_count,
+        "max_count": upper,
+        "probability": probability,
+        "expectation": expectation,
+        "pmf": {str(k): p for k, p in pmf.items()},
+    }
+    return WorkflowResult(markdown="\n".join(lines), data=data)
+
+
+# ---------------------------------------------------------------------------
+# Card classification (simulate_opening_hands tool)
+# ---------------------------------------------------------------------------
+
+
+class _CardClass(enum.Enum):
+    """Mana-simulation category a card is bucketed into."""
+
+    LAND = "land"
+    MDFC_LAND = "mdfc_land"
+    ROCK = "rock"
+    DORK = "dork"
+    RAMP_SPELL = "ramp_spell"
+    OTHER = "other"
+
+
+_RAMP_CLASSES = frozenset({_CardClass.ROCK, _CardClass.DORK, _CardClass.RAMP_SPELL})
+
+
+class _Slot(NamedTuple):
+    """A single deck slot reduced to only what the simulation loop needs."""
+
+    cls: _CardClass
+    cmc: int
+    production: int
+
+
+def _classify_card(
+    card: Card,
+    *,
+    extra_mana_sources: frozenset[str],
+    exclude_cards: frozenset[str],
+) -> _CardClass:
+    """Classify a resolved card into a mana-simulation category.
+
+    Rules are checked in order; the first match wins.
+    """
+    name_lower = card.name.lower()
+    if name_lower in exclude_cards:
+        return _CardClass.OTHER
+    if name_lower in extra_mana_sources:
+        return _CardClass.ROCK
+
+    front_type = card.type_line.split(" // ")[0]
+    if "Land" in front_type:
+        return _CardClass.LAND
+
+    if " // " in card.type_line:
+        _, back_type = card.type_line.split(" // ", 1)
+        if "Land" in back_type:
+            return _CardClass.MDFC_LAND
+
+    oracle = card.oracle_text or ""
+    if (
+        "Artifact" in card.type_line
+        and "Creature" not in card.type_line
+        and card.cmc <= 3
+        and "{T}: Add" in oracle
+    ):
+        return _CardClass.ROCK
+    if "Creature" in card.type_line and card.cmc <= 3 and "{T}: Add" in oracle:
+        return _CardClass.DORK
+    if _RAMP_SPELL_RE.search(oracle):
+        return _CardClass.RAMP_SPELL
+    return _CardClass.OTHER
+
+
+def _mana_production(card: Card | None, cls: _CardClass) -> int:
+    """Compute how much mana a classified card produces when active.
+
+    Lands, MDFC lands, and ramp-spell lands produce 1. Rocks and dorks produce
+    the number of colored/colorless mana symbols in the first oracle line that
+    contains "Add" (minimum 1). A rock/dork with no resolved card data (an
+    ``extra_mana_sources`` override on an unresolved name) defaults to 1.
+    """
+    if cls in (_CardClass.LAND, _CardClass.MDFC_LAND, _CardClass.RAMP_SPELL):
+        return 1
+    if cls in (_CardClass.ROCK, _CardClass.DORK):
+        if card is None:
+            return 1
+        oracle = card.oracle_text or ""
+        for line in oracle.splitlines():
+            if "Add" in line:
+                return max(len(_MANA_SYMBOL_RE.findall(line)), 1)
+        return 1
+    return 0
+
+
+async def _resolve_deck(
+    decklist: list[str],
+    *,
+    bulk: ScryfallBulkClient | None,
+    scryfall: ScryfallClient,
+) -> tuple[list[tuple[int, str]], dict[str, Card], list[str]]:
+    """Parse and resolve a decklist, bulk-data-first with Scryfall fallback.
+
+    Returns:
+        A tuple of ``(slots, cards_by_name, unresolved)`` where ``slots`` is
+        the parsed ``(quantity, name)`` pairs in decklist order, ``cards_by_name``
+        maps lowercase card name to the resolved ``Card``, and ``unresolved``
+        lists the original names that could not be resolved.
+    """
+    from mtg_mcp_server.workflows.card_resolver import resolve_card
+
+    slots = parse_decklist(decklist)
+    unique_names = list(dict.fromkeys(name for _, name in slots))
+
+    # Cap concurrent Scryfall lookups to avoid overwhelming the connection pool.
+    sem = asyncio.Semaphore(10)
+
+    async def _bounded_resolve(name: str) -> Card:
+        async with sem:
+            return await resolve_card(name, bulk=bulk, scryfall=scryfall)
+
+    tasks = [_bounded_resolve(name) for name in unique_names]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    cards_by_name: dict[str, Card] = {}
+    unresolved: list[str] = []
+    for name, result in zip(unique_names, results, strict=True):
+        if isinstance(result, BaseException):
+            log.warning(
+                "simulate_opening_hands.resolve_failed",
+                card=name,
+                error=str(result),
+                error_type=type(result).__name__,
+            )
+            unresolved.append(name)
+        else:
+            cards_by_name[name.lower()] = result
+
+    return slots, cards_by_name, unresolved
+
+
+# ---------------------------------------------------------------------------
+# Monte Carlo goldfish engine -- pure, synchronous, hot-loop friendly
+# ---------------------------------------------------------------------------
+
+
+def _effective_lands(hand: list[_Slot], count_mdfc_lands: bool) -> float:
+    """Effective land count: LAND cards plus half of MDFC lands (if counted)."""
+    lands = float(sum(1 for c in hand if c.cls == _CardClass.LAND))
+    if count_mdfc_lands:
+        lands += 0.5 * sum(1 for c in hand if c.cls == _CardClass.MDFC_LAND)
+    return lands
+
+
+def _keep(hand: list[_Slot], min_lands: int, max_lands: int, count_mdfc_lands: bool) -> bool:
+    """Keep rule: effective lands within [min_lands, max_lands] inclusive."""
+    effective = _effective_lands(hand, count_mdfc_lands)
+    return min_lands <= effective <= max_lands
+
+
+def _bottom_cards(
+    hand: list[_Slot], n: int, count_mdfc_lands: bool
+) -> tuple[list[_Slot], list[_Slot]]:
+    """Select ``n`` cards to bottom for a London mulligan.
+
+    Bottoms a land while more than 3 effective lands remain in hand, otherwise
+    bottoms the highest-CMC non-land card (ties broken by hand order, stable).
+    """
+    remaining = list(hand)
+    bottomed: list[_Slot] = []
+    for _ in range(n):
+        if not remaining:
+            break
+        effective = _effective_lands(remaining, count_mdfc_lands)
+        land_indices = [
+            i for i, c in enumerate(remaining) if c.cls in (_CardClass.LAND, _CardClass.MDFC_LAND)
+        ]
+        if effective > 3 and land_indices:
+            idx = land_indices[0]
+        else:
+            non_land_indices = [
+                i
+                for i, c in enumerate(remaining)
+                if c.cls not in (_CardClass.LAND, _CardClass.MDFC_LAND)
+            ]
+            if non_land_indices:
+                idx = max(non_land_indices, key=lambda i: remaining[i].cmc)
+            elif land_indices:
+                idx = land_indices[0]
+            else:
+                idx = 0
+        bottomed.append(remaining.pop(idx))
+    return remaining, bottomed
+
+
+def _goldfish(
+    kept_hand: list[_Slot],
+    library: list[_Slot],
+    *,
+    count_mdfc_lands: bool,
+) -> dict[str, Any]:
+    """Greedy goldfish over turns 1-5: 1 land drop then castable ramp pieces.
+
+    Timing: lands and mana rocks produce immediately on the turn played. Dorks
+    (summoning sickness) and ramp-spell lands (enter tapped) become active
+    starting the following turn. The turn's spendable mana is the pool left
+    over after casting this turn's payable rocks/dorks/ramp spells.
+    """
+    hand = list(kept_hand)
+    draw_pool = list(library)
+    battlefield: list[tuple[_CardClass, int, int]] = []  # (cls, production, played_turn)
+    spendable_by_turn: list[float] = []
+    ramp_by_turn2 = False
+
+    for turn in range(1, 6):
+        if draw_pool:
+            hand.append(draw_pool.pop(0))
+
+        land_idx = next((i for i, c in enumerate(hand) if c.cls == _CardClass.LAND), None)
+        if land_idx is None and count_mdfc_lands:
+            land_idx = next((i for i, c in enumerate(hand) if c.cls == _CardClass.MDFC_LAND), None)
+        if land_idx is not None:
+            played = hand.pop(land_idx)
+            battlefield.append((played.cls, played.production, turn))
+
+        pool = 0
+        for cls, production, played_turn in battlefield:
+            if cls in (_CardClass.LAND, _CardClass.MDFC_LAND, _CardClass.ROCK):
+                if played_turn <= turn:
+                    pool += production
+            elif played_turn < turn:
+                pool += production
+
+        castable = sorted((c for c in hand if c.cls in _RAMP_CLASSES), key=lambda c: c.cmc)
+        for card in castable:
+            if card.cmc > pool:
+                break
+            pool -= card.cmc
+            hand.remove(card)
+            battlefield.append((card.cls, card.production, turn))
+            if card.cls == _CardClass.ROCK:
+                pool += card.production
+            if turn <= 2:
+                ramp_by_turn2 = True
+
+        spendable_by_turn.append(float(pool))
+
+    return {"spendable_by_turn": spendable_by_turn, "ramp_by_turn2": ramp_by_turn2}
+
+
+def _simulate_once(
+    deck: list[_Slot],
+    rng: random.Random,
+    *,
+    min_lands: int,
+    max_lands: int,
+    count_mdfc_lands: bool,
+) -> dict[str, Any]:
+    """Simulate one London-mulligan opening hand plus a 5-turn goldfish."""
+    library = list(deck)
+    rng.shuffle(library)
+
+    mulligans = 0
+    kept_hand: list[_Slot] = []
+    rest: list[_Slot] = []
+    bottomed: list[_Slot] = []
+    while True:
+        hand = library[:7]
+        rest = library[7:]
+        kept_candidate, bottomed = _bottom_cards(hand, mulligans, count_mdfc_lands)
+        forced = mulligans >= 3
+        if forced or _keep(kept_candidate, min_lands, max_lands, count_mdfc_lands):
+            kept_hand = kept_candidate
+            break
+        # Mulligan again: shuffle the drawn hand back into the library (London mulligan).
+        library = rest + hand
+        rng.shuffle(library)
+        mulligans += 1
+
+    final_library = rest + bottomed
+    goldfish = _goldfish(kept_hand, final_library, count_mdfc_lands=count_mdfc_lands)
+
+    return {
+        "hand_size": len(kept_hand),
+        "effective_lands": _effective_lands(kept_hand, count_mdfc_lands),
+        "spendable_by_turn": goldfish["spendable_by_turn"],
+        "ramp_by_turn2": goldfish["ramp_by_turn2"],
+    }
+
+
+def _run_simulation(
+    deck: list[_Slot],
+    *,
+    iterations: int,
+    seed: int | None,
+    min_lands: int,
+    max_lands: int,
+    count_mdfc_lands: bool,
+) -> dict[str, Any]:
+    """Run the Monte Carlo goldfish simulation ``iterations`` times and aggregate."""
+    rng = random.Random(seed)
+    keep_counts = {7: 0, 6: 0, 5: 0, 4: 0}
+    kept_land_totals: dict[float, int] = {}
+    spendable_totals = [0.0] * 5
+    on_curve_counts = [0] * 5
+    ramp_by_turn2 = 0
+
+    for _ in range(iterations):
+        result = _simulate_once(
+            deck,
+            rng,
+            min_lands=min_lands,
+            max_lands=max_lands,
+            count_mdfc_lands=count_mdfc_lands,
+        )
+        keep_counts[result["hand_size"]] += 1
+        lands = result["effective_lands"]
+        kept_land_totals[lands] = kept_land_totals.get(lands, 0) + 1
+        spendable_by_turn = result["spendable_by_turn"]
+        for i in range(5):
+            spendable_totals[i] += spendable_by_turn[i]
+            if spendable_by_turn[i] >= (i + 1):
+                on_curve_counts[i] += 1
+        if result["ramp_by_turn2"]:
+            ramp_by_turn2 += 1
+
+    return {
+        "keep_pct_by_hand_size": {size: count / iterations for size, count in keep_counts.items()},
+        "kept_land_distribution": {
+            lands: count / iterations for lands, count in kept_land_totals.items()
+        },
+        "avg_spendable_mana_by_turn": {i + 1: spendable_totals[i] / iterations for i in range(5)},
+        "on_curve_pct_by_turn": {i + 1: on_curve_counts[i] / iterations for i in range(5)},
+        "ramp_by_turn2_pct": ramp_by_turn2 / iterations,
+    }
+
+
+# ---------------------------------------------------------------------------
+# simulate_opening_hands tool
+# ---------------------------------------------------------------------------
+
+
+async def simulate_opening_hands(
+    decklist: list[str],
+    *,
+    iterations: int = 10000,
+    seed: int | None = None,
+    min_lands: int = 2,
+    max_lands: int = 5,
+    count_mdfc_lands: bool = True,
+    extra_mana_sources: list[str] | None = None,
+    exclude_cards: list[str] | None = None,
+    bulk: ScryfallBulkClient | None,
+    scryfall: ScryfallClient,
+) -> WorkflowResult:
+    """Monte Carlo simulation of opening hands, mulligans, and early mana curve.
+
+    Resolves the decklist bulk-data-first, classifies each card as a land, MDFC
+    land, mana rock, mana dork, land-fetch ramp spell, or other, then simulates
+    London-mulligan opening hands and a greedy 5-turn goldfish to estimate keep
+    rates, kept-hand land distribution, and spendable mana per turn.
+
+    Args:
+        decklist: Card entries, excluding the commander (a 99-card Commander
+            library). Lands and spells both belong in this list.
+        iterations: Number of simulated games (100-100000).
+        seed: RNG seed for reproducible results. Omit for a random seed.
+        min_lands: Minimum effective lands to keep an opening hand.
+        max_lands: Maximum effective lands to keep an opening hand.
+        count_mdfc_lands: Count modal-double-faced land backs as half a land.
+        extra_mana_sources: Card names to force-classify as mana rocks (useful
+            for cards this tool misclassifies or cannot resolve).
+        exclude_cards: Card names to force-classify as non-mana (e.g. false
+            positives from the ramp-spell heuristic).
+        bulk: Optional ScryfallBulkClient for rate-limit-free resolution.
+        scryfall: Initialized ScryfallClient (fallback resolver).
+
+    Returns:
+        WorkflowResult with markdown and structured data. The keep rule only
+        weighs lands (not rocks/dorks) -- a known v1 limitation.
+    """
+    log.info("simulate_opening_hands.start", cards=len(decklist), iterations=iterations)
+
+    if not (100 <= iterations <= 100000):
+        raise ValueError(f"iterations must be between 100 and 100000, got {iterations}")
+    if min_lands > max_lands:
+        raise ValueError(f"min_lands ({min_lands}) cannot exceed max_lands ({max_lands})")
+
+    slots, cards_by_name, unresolved = await _resolve_deck(decklist, bulk=bulk, scryfall=scryfall)
+
+    deck_size = sum(qty for qty, _ in slots)
+    if deck_size < 7:
+        raise ValueError(f"Deck must contain at least 7 cards, got {deck_size}")
+
+    extra_set = frozenset(n.lower() for n in (extra_mana_sources or []))
+    exclude_set = frozenset(n.lower() for n in (exclude_cards or []))
+
+    card_classes: dict[str, list[str]] = {c.name: [] for c in _CardClass}
+    slot_by_key: dict[str, _Slot] = {}
+    for name in dict.fromkeys(name for _, name in slots):
+        key = name.lower()
+        card = cards_by_name.get(key)
+        if card is not None:
+            cls = _classify_card(card, extra_mana_sources=extra_set, exclude_cards=exclude_set)
+            cmc_int = round(card.cmc)
+            display_name = card.name
+        else:
+            cls = (
+                _CardClass.ROCK if key in extra_set and key not in exclude_set else _CardClass.OTHER
+            )
+            cmc_int = 0
+            display_name = name
+        production = _mana_production(card, cls)
+        slot_by_key[key] = _Slot(cls, cmc_int, production)
+        card_classes[cls.name].append(display_name)
+
+    deck: list[_Slot] = []
+    for qty, name in slots:
+        deck.extend([slot_by_key[name.lower()]] * qty)
+
+    stats = _run_simulation(
+        deck,
+        iterations=iterations,
+        seed=seed,
+        min_lands=min_lands,
+        max_lands=max_lands,
+        count_mdfc_lands=count_mdfc_lands,
+    )
+
+    lines = [
+        "# Opening Hand Simulation",
+        "",
+        f"**Simulating a {deck_size}-card library** (commander already excluded)",
+        f"**Iterations:** {iterations}" + (f"  **Seed:** {seed}" if seed is not None else ""),
+        f"**Land Range:** {min_lands}-{max_lands} effective lands to keep",
+        "",
+        "## Keep Rates",
+        "",
+        "| Hand Size | Keep % |",
+        "|---|---|",
+    ]
+    for size in (7, 6, 5, 4):
+        label = f"{size} (forced)" if size == 4 else str(size)
+        lines.append(f"| {label} | {stats['keep_pct_by_hand_size'][size]:.1%} |")
+    lines.append("")
+
+    lines.append("## Kept Hand Land Distribution")
+    lines.append("")
+    lines.append("*Only lands (not rocks/dorks) count toward the keep decision -- v1 limitation.*")
+    lines.append("")
+    lines.append("| Effective Lands | % of Kept Hands |")
+    lines.append("|---|---|")
+    for lands in sorted(stats["kept_land_distribution"]):
+        lines.append(f"| {lands:g} | {stats['kept_land_distribution'][lands]:.1%} |")
+    lines.append("")
+
+    lines.append("## Mana by Turn")
+    lines.append("")
+    lines.append(
+        "*Spendable mana is the NET pool left after casting this turn's mana rocks/"
+        "dorks/ramp spells, not the raw total produced. A turn spent playing a rock "
+        'can read "off curve" even though it is setting up bigger turns ahead.*'
+    )
+    lines.append("")
+    lines.append("| Turn | Avg Spendable Mana | On Curve % |")
+    lines.append("|---|---|---|")
+    for turn in range(1, 6):
+        avg = stats["avg_spendable_mana_by_turn"][turn]
+        on_curve = stats["on_curve_pct_by_turn"][turn]
+        lines.append(f"| {turn} | {avg:.2f} | {on_curve:.1%} |")
+    lines.append("")
+
+    lines.append("## Ramp")
+    lines.append("")
+    lines.append(f"- Mana source cast by turn 2: {stats['ramp_by_turn2_pct']:.1%}")
+    lines.append("")
+
+    lines.append("## Detected Card Classes")
+    lines.append("")
+    for cls in (
+        _CardClass.LAND,
+        _CardClass.MDFC_LAND,
+        _CardClass.ROCK,
+        _CardClass.DORK,
+        _CardClass.RAMP_SPELL,
+    ):
+        names = card_classes[cls.name]
+        if names:
+            lines.append(f"- **{cls.value}** ({len(names)}): {', '.join(sorted(names))}")
+    lines.append("")
+
+    if unresolved:
+        lines.append("## Warnings")
+        lines.append("")
+        lines.append(f"- {len(unresolved)} card(s) could not be resolved: {', '.join(unresolved)}")
+        lines.append("")
+
+    log.info("simulate_opening_hands.complete", deck_size=deck_size, iterations=iterations)
+    data: dict[str, object] = {
+        "iterations": iterations,
+        "seed": seed,
+        "deck_size": deck_size,
+        **stats,
+        "card_classes": card_classes,
+        "unresolved": unresolved,
+        "params": {
+            "min_lands": min_lands,
+            "max_lands": max_lands,
+            "count_mdfc_lands": count_mdfc_lands,
+            "extra_mana_sources": sorted(extra_set),
+            "exclude_cards": sorted(exclude_set),
+        },
+    }
+    return WorkflowResult(markdown="\n".join(lines), data=data)

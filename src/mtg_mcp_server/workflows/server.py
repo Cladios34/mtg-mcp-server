@@ -4,7 +4,7 @@ This module is the wiring layer between MCP and the pure workflow functions
 in ``commander.py``, ``commander_depth.py``, ``draft.py``, ``draft_limited.py``,
 ``deck.py``, ``analysis.py``, ``building.py``, ``constructed.py``,
 ``metagame.py``, ``sideboard.py``, ``validation.py``, ``mana_base.py``,
-``pricing.py``, and ``rules.py``.  Each tool here wraps a pure async function,
+``simulation.py``, ``pricing.py``, and ``rules.py``.  Each tool here wraps a pure async function,
 injecting the service clients from the module-level state and converting
 service exceptions to ``ToolError``.
 
@@ -1469,6 +1469,103 @@ async def suggest_mana_base(
         raise ToolError(str(exc)) from exc
     except ServiceError as exc:
         raise ToolError(f"suggest_mana_base failed: {exc}") from exc
+
+
+@workflow_mcp.tool(annotations=TOOL_ANNOTATIONS, tags=TAGS_BUILD)
+async def hand_probability(
+    deck_size: Annotated[
+        int, Field(description="Total cards in the library (default 99 for Commander)")
+    ] = 99,
+    copies: Annotated[int, Field(description="Number of matching cards in the deck")] = 1,
+    cards_seen: Annotated[
+        int, Field(description="Cards drawn/seen so far (default 7 for an opening hand)")
+    ] = 7,
+    min_count: Annotated[
+        int, Field(description="Minimum matching cards to count as a hit (inclusive)")
+    ] = 1,
+    max_count: Annotated[
+        int | None,
+        Field(description="Maximum matching cards to count as a hit (inclusive, default: no cap)"),
+    ] = None,
+) -> ToolResult:
+    """Compute the exact hypergeometric probability of seeing a card category.
+
+    Answers questions like "what are the odds I've seen at least 1 of my 3
+    tutors by turn 4?" via the closed-form hypergeometric distribution.
+    """
+    from mtg_mcp_server.workflows.simulation import hand_probability as impl
+
+    try:
+        result = await impl(
+            deck_size,
+            copies,
+            cards_seen,
+            min_count=min_count,
+            max_count=max_count,
+        )
+        return ToolResult(content=result.markdown, structured_content=result.data)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@workflow_mcp.tool(annotations=TOOL_ANNOTATIONS, tags=TAGS_BUILD)
+async def simulate_opening_hands(
+    decklist: Annotated[
+        list[str],
+        Field(description="Card entries, excluding the commander (a 99-card Commander library)"),
+    ],
+    iterations: Annotated[int, Field(description="Number of simulated games (100-100000)")] = 10000,
+    seed: Annotated[
+        int | None, Field(description="RNG seed for reproducible results (omit for random)")
+    ] = None,
+    min_lands: Annotated[
+        int, Field(description="Minimum effective lands to keep an opening hand")
+    ] = 2,
+    max_lands: Annotated[
+        int, Field(description="Maximum effective lands to keep an opening hand")
+    ] = 5,
+    count_mdfc_lands: Annotated[
+        bool, Field(description="Count modal-double-faced land backs as half a land")
+    ] = True,
+    extra_mana_sources: Annotated[
+        list[str] | None,
+        Field(description="Card names to force-classify as mana rocks"),
+    ] = None,
+    exclude_cards: Annotated[
+        list[str] | None,
+        Field(description="Card names to force-classify as non-mana"),
+    ] = None,
+) -> ToolResult:
+    """Monte Carlo simulation of opening hands, mulligans, and early mana curve.
+
+    Simulates London-mulligan opening hands and a greedy 5-turn goldfish to
+    estimate keep rates, kept-hand land distribution, and spendable mana per
+    turn. Exclude the commander from ``decklist``: it simulates a 99-card
+    Commander library.
+    """
+    from mtg_mcp_server.workflows.simulation import simulate_opening_hands as impl
+
+    if not decklist:
+        raise ToolError("Provide at least one card in the decklist.")
+
+    try:
+        result = await impl(
+            decklist,
+            iterations=iterations,
+            seed=seed,
+            min_lands=min_lands,
+            max_lands=max_lands,
+            count_mdfc_lands=count_mdfc_lands,
+            extra_mana_sources=extra_mana_sources,
+            exclude_cards=exclude_cards,
+            bulk=_bulk,
+            scryfall=_require_scryfall(),
+        )
+        return ToolResult(content=result.markdown, structured_content=result.data)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+    except ServiceError as exc:
+        raise ToolError(f"simulate_opening_hands failed: {exc}") from exc
 
 
 @workflow_mcp.tool(annotations=TOOL_ANNOTATIONS, tags=TAGS_PRICING)

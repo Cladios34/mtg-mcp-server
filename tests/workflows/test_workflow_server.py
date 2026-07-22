@@ -34,6 +34,17 @@ class TestWorkflowToolsRegistered:
         assert "evaluate_upgrade" in tool_names
         assert "draft_pack_pick" in tool_names
         assert "suggest_cuts" in tool_names
+        assert "hand_probability" in tool_names
+        assert "simulate_opening_hands" in tool_names
+
+    async def test_hand_probability_call_returns_structured_content(self, mcp_client: Client):
+        """hand_probability is callable end-to-end and returns structured data."""
+        result = await mcp_client.call_tool(
+            "hand_probability",
+            {"deck_size": 10, "copies": 5, "cards_seen": 3, "min_count": 1},
+        )
+        assert result.structured_content
+        assert result.structured_content["deck_size"] == 10
 
 
 # ---------------------------------------------------------------------------
