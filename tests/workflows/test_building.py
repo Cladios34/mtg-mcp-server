@@ -744,11 +744,35 @@ class TestCompleteDeck:
             ),
         )
 
+        # Recursion nets a card like a draw does (Commander convention)
+        reanimate = _mock_card(
+            "Reanimate",
+            type_line="Sorcery",
+            oracle_text=(
+                "Put target creature card from a graveyard onto the battlefield "
+                "under your control. You lose life equal to its mana value."
+            ),
+        )
+        animate_dead = _mock_card(
+            "Animate Dead",
+            type_line="Enchantment - Aura",
+            oracle_text=(
+                "Enchant creature card in a graveyard. When this enchantment "
+                "enters, if it's on the battlefield, it loses 'enchant creature "
+                "card in a graveyard'... Return target creature card from your "
+                "graveyard to the battlefield."
+            ),
+        )
+
         assert _card_roles(vilis) == ["creatures", "card_draw"]
         assert _card_roles(vilis_real) == ["creatures", "card_draw"]
         assert _card_roles(bolt) == ["removal"]
         assert _card_roles(gisela) == ["creatures"]
         assert "card_draw" not in _card_roles(tithe)
+        assert "card_draw" in _card_roles(animate_dead)
+        # 'from a graveyard' (any graveyard) wording is NOT matched — only
+        # self-recursion counts; Reanimate slips through, acceptable miss.
+        assert _card_roles(reanimate) == ["spells"]
 
     async def test_multi_role_prevents_phantom_gaps(self, mock_bulk: AsyncMock) -> None:
         """Creatures that draw count toward BOTH ratios in gap analysis."""

@@ -601,6 +601,13 @@ _DRAW_PATTERNS = [
 # NOTE: a bare "draws a card" is deliberately absent — it would classify
 # opponent-draw punishers ("Whenever an opponent draws a card...", Smothering
 # Tithe) as card draw.
+# Recursion counts as card advantage by Commander convention (returning a card
+# from the graveyard nets a card just like drawing one).
+_RECURSION_PATTERNS = [
+    "from your graveyard to your hand",
+    "from your graveyard to the battlefield",
+    "return target creature card from your graveyard",
+]
 # Deliberately narrower than a bare "deals"/"damage to" (which matched almost any
 # red card, e.g. Gisela's damage-doubling text): only targeted/mass answers count.
 _REMOVAL_PATTERNS = [
@@ -646,7 +653,9 @@ def _card_roles(card: Card) -> list[str]:
         t in oracle_lower for t in ["add {", "add one mana", "search your library for a"]
     ) and ("land" in oracle_lower or "mana" in oracle_lower):
         roles.append("ramp")
-    if any(t in oracle_lower for t in _DRAW_PATTERNS):
+    if any(t in oracle_lower for t in _DRAW_PATTERNS) or any(
+        t in oracle_lower for t in _RECURSION_PATTERNS
+    ):
         roles.append("card_draw")
     if any(t in oracle_lower for t in _REMOVAL_PATTERNS):
         roles.append("removal")
