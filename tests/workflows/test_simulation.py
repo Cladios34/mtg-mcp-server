@@ -641,3 +641,42 @@ class TestLandsV1ExactReproduction:
             4.0: 0.162,
             5.0: 0.038,
         }
+
+
+class TestPlayabilityExactReproduction:
+    """Default playability rule reproduces its pre-v3 output bit-for-bit (T11).
+
+    Guards the v3 color-screen/tutor extension against regressions: with no
+    ``commander_colors``/``tutor_aware`` inputs, every pre-existing aggregate
+    must stay numerically identical. Any drift here means a new field is being
+    read outside its feature-flag guard.
+    """
+
+    def test_matches_playability_reference(self):
+        # Reference literals captured on commit 6e59a52 (intact main, pre-v3) via a
+        # throwaway _run_simulation run: this exact deck, iterations=500, seed=42,
+        # playability defaults (min_lands=2, max_lands=5, mdfc=True, free_mull=True, gas=4).
+        deck = [_Slot(_CardClass.LAND, 0, 1)] * 36 + [_Slot(_CardClass.OTHER, 3, 0)] * 63
+
+        result = _run_simulation(
+            deck,
+            iterations=500,
+            seed=42,
+            min_lands=2,
+            max_lands=5,
+            count_mdfc_lands=True,
+            keep_rule="playability",
+            free_mulligan=True,
+            gas_cmc_threshold=4,
+        )
+
+        assert result["keep_pct_by_hand_size"] == {7: 0.942, 6: 0.05, 5: 0.006, 4: 0.002}
+        assert result["kept_land_distribution"] == {4.0: 0.188, 3.0: 0.356, 2.0: 0.408, 5.0: 0.048}
+        assert result["avg_spendable_mana_by_turn"] == {1: 1.0, 2: 2.0, 3: 2.894, 4: 3.68, 5: 4.308}
+        assert result["on_curve_pct_by_turn"] == {1: 1.0, 2: 1.0, 3: 0.894, 4: 0.748, 5: 0.548}
+        assert result["ramp_by_turn2_pct"] == 0.0
+        assert result["keep_pct_by_mulligans"] == {"0": 0.802, "1": 0.14, "2": 0.05, "3plus": 0.008}
+        # Pre-existing mull-reason keys must not drift (a "colors" key may be added additively).
+        assert result["mull_reasons"]["screw"] == 130
+        assert result["mull_reasons"]["flood"] == 3
+        assert result["mull_reasons"]["no_gas"] == 0
