@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import structlog
 
+from mtg_mcp_server.utils.color_identity import parse_color_identity
 from mtg_mcp_server.utils.decklist import parse_decklist
 from mtg_mcp_server.utils.mana import count_pips
 from mtg_mcp_server.workflows import WorkflowResult
@@ -970,6 +971,8 @@ async def simulate_opening_hands(
     gas_cmc_threshold: int = 4,
     extra_mana_sources: list[str] | None = None,
     exclude_cards: list[str] | None = None,
+    commander_colors: str | None = None,
+    tutor_aware: bool = False,
     bulk: ScryfallBulkClient | None,
     scryfall: ScryfallClient,
 ) -> WorkflowResult:
@@ -982,6 +985,11 @@ async def simulate_opening_hands(
     keep rule ("playability") judges a hand by a 3-turn goldfish of the hand
     alone -- development speed, flood, and castable gas -- rather than lands
     alone; the legacy lands-only rule is available as ``keep_rule="lands_v1"``.
+
+    Optional ``commander_colors`` enables a color screen (a hand that cannot
+    source every commander color is mulliganed) and ``tutor_aware`` treats cheap
+    tutors as gas and reports tutor coverage. The color screen applies to the
+    playability keep rule only; ``keep_rule="lands_v1"`` ignores it entirely.
 
     Args:
         decklist: Card entries, excluding the commander (a 99-card Commander
@@ -1004,6 +1012,11 @@ async def simulate_opening_hands(
             for cards this tool misclassifies or cannot resolve).
         exclude_cards: Card names to force-classify as non-mana (e.g. false
             positives from the ramp-spell heuristic).
+        commander_colors: Commander color identity (e.g. "mardu", "WBR",
+            "boros"). Enables the playability-rule color screen. Raises
+            ValueError if unparseable.
+        tutor_aware: Detect tutors, count them as gas, and report per-tutor
+            targets and the odds of an opening hand holding a tutor.
         bulk: Optional ScryfallBulkClient for rate-limit-free resolution.
         scryfall: Initialized ScryfallClient (fallback resolver).
 
@@ -1021,6 +1034,8 @@ async def simulate_opening_hands(
     if gas_cmc_threshold < 0:
         raise ValueError(f"gas_cmc_threshold must be non-negative, got {gas_cmc_threshold}")
 
+    parsed_colors = parse_color_identity(commander_colors) if commander_colors else frozenset()
+
     slots, cards_by_name, unresolved = await _resolve_deck(decklist, bulk=bulk, scryfall=scryfall)
 
     deck_size = sum(qty for qty, _ in slots)
@@ -1033,18 +1048,32 @@ async def simulate_opening_hands(
     deck_land_colors = _deck_land_colors(
         cards_by_name, extra_mana_sources=extra_set, exclude_cards=exclude_set
     )
+    resolved_cards = list(cards_by_name.values())
 
     card_classes: dict[str, list[str]] = {c.name: [] for c in _CardClass}
     slot_by_key: dict[str, _Slot] = {}
+    tutors: list[_TutorInfo] = []
     for name in dict.fromkeys(name for _, name in slots):
         key = name.lower()
         card = cards_by_name.get(key)
+        is_tutor = False
         if card is not None:
             cls = _classify_card(card, extra_mana_sources=extra_set, exclude_cards=exclude_set)
             cmc_int = round(card.cmc)
             display_name = card.name
             colors = _source_colors(card, cls, deck_land_colors=deck_land_colors)
             pips = frozenset(count_pips(card.mana_cost)) & _COLOR_LETTERS
+            if tutor_aware:
+                classified = _classify_tutor(card, cls)
+                if classified is not None:
+                    is_tutor = True
+                    constraint, destination, speed = classified
+                    target_names, target_count = _tutor_targets(constraint, resolved_cards)
+                    tutors.append(
+                        _TutorInfo(
+                            display_name, constraint, destination, speed, target_names, target_count
+                        )
+                    )
         else:
             cls = (
                 _CardClass.ROCK if key in extra_set and key not in exclude_set else _CardClass.OTHER
@@ -1054,7 +1083,7 @@ async def simulate_opening_hands(
             colors = frozenset()
             pips = frozenset()
         production = _mana_production(card, cls)
-        slot_by_key[key] = _Slot(cls, cmc_int, production, colors, pips)
+        slot_by_key[key] = _Slot(cls, cmc_int, production, colors, pips, is_tutor)
         card_classes[cls.name].append(display_name)
 
     deck: list[_Slot] = []
@@ -1071,6 +1100,8 @@ async def simulate_opening_hands(
         keep_rule=keep_rule,
         free_mulligan=free_mulligan,
         gas_cmc_threshold=gas_cmc_threshold,
+        commander_colors=parsed_colors,
+        tutor_aware=tutor_aware,
     )
 
     lines = [
@@ -1096,10 +1127,13 @@ async def simulate_opening_hands(
         lines.append(f"| {mull_label} | {stats['keep_pct_by_mulligans'][mull_label]:.1%} |")
     lines.append("")
     mull_reasons = stats["mull_reasons"]
-    lines.append(
+    mull_line = (
         f"- Mulled hands: {mull_reasons['screw']} screw, {mull_reasons['flood']} flood, "
         f"{mull_reasons['no_gas']} no gas"
     )
+    if parsed_colors:
+        mull_line += f", {mull_reasons['colors']} off-color"
+    lines.append(mull_line)
     if keep_rule == "playability":
         lines.append(
             "- Playability rule: a hand is kept based on a 3-turn goldfish of the hand "
@@ -1153,6 +1187,37 @@ async def simulate_opening_hands(
     lines.append(f"- Mana source cast by turn 2: {stats['ramp_by_turn2_pct']:.1%}")
     lines.append("")
 
+    color_screen: dict[str, object] = {}
+    if parsed_colors:
+        color_mull_pct = mull_reasons["colors"] / iterations
+        color_screen = {
+            "commander_colors": sorted(parsed_colors),
+            "color_mull_pct": color_mull_pct,
+        }
+        lines.append("## Color Screen")
+        lines.append("")
+        lines.append(f"- Commander colors: {', '.join(sorted(parsed_colors))}")
+        lines.append(f"- Hands mulliganed for missing a color: {color_mull_pct:.1%}")
+        lines.append(
+            "*A hand is screened out when it cannot source every commander color "
+            "(playability rule only).*"
+        )
+        lines.append("")
+
+    if tutors:
+        lines.append("## Tutors")
+        lines.append("")
+        lines.append(f"- Opening hand holds a tutor: {stats['tutor_in_hand_pct']:.1%}")
+        lines.append("")
+        lines.append("| Tutor | Finds | To | Speed | Targets |")
+        lines.append("|---|---|---|---|---|")
+        for tutor in sorted(tutors, key=lambda t: t.name):
+            lines.append(
+                f"| {tutor.name} | {tutor.target_constraint} | {tutor.destination} "
+                f"| {tutor.speed} | {tutor.target_count} |"
+            )
+        lines.append("")
+
     lines.append("## Detected Card Classes")
     lines.append("")
     for cls in (
@@ -1180,6 +1245,8 @@ async def simulate_opening_hands(
         "deck_size": deck_size,
         **stats,
         "card_classes": card_classes,
+        "tutors": [t._asdict() for t in tutors],
+        "color_screen": color_screen,
         "unresolved": unresolved,
         "params": {
             "min_lands": min_lands,
@@ -1190,6 +1257,8 @@ async def simulate_opening_hands(
             "gas_cmc_threshold": gas_cmc_threshold,
             "extra_mana_sources": sorted(extra_set),
             "exclude_cards": sorted(exclude_set),
+            "commander_colors": sorted(parsed_colors),
+            "tutor_aware": tutor_aware,
         },
     }
     return WorkflowResult(markdown="\n".join(lines), data=data)

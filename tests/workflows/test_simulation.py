@@ -948,3 +948,55 @@ class TestPlayabilityExactReproduction:
         assert result["mull_reasons"]["screw"] == 130
         assert result["mull_reasons"]["flood"] == 3
         assert result["mull_reasons"]["no_gas"] == 0
+
+
+class TestSimulateOpeningHandsV3:
+    """End-to-end color-screen and tutor extensions via mocked resolution."""
+
+    async def test_tutor_aware_reports_tutors_and_odds(self):
+        cards = _bear_cards(62)
+        cards["forest"] = FOREST
+        cards["demonic tutor"] = _DEMONIC_TUTOR
+        bulk = _make_bulk(cards)
+        decklist = ["36x Forest", "Demonic Tutor", *[f"Bear {i}" for i in range(62)]]
+
+        result = await simulate_opening_hands(
+            decklist,
+            iterations=200,
+            seed=1,
+            tutor_aware=True,
+            bulk=bulk,
+            scryfall=_make_scryfall(cards),
+        )
+        tutor_names = [t["name"] for t in result.data["tutors"]]
+        assert "Demonic Tutor" in tutor_names
+        assert isinstance(result.data["tutor_in_hand_pct"], float)
+        assert result.data["params"]["tutor_aware"] is True
+
+    async def test_commander_colors_parsed_into_params(self):
+        cards = _bear_cards(63)
+        cards["forest"] = FOREST
+        bulk = _make_bulk(cards)
+
+        result = await simulate_opening_hands(
+            _basic_deck(),
+            iterations=200,
+            seed=1,
+            commander_colors="mardu",
+            bulk=bulk,
+            scryfall=_make_scryfall(cards),
+        )
+        assert result.data["params"]["commander_colors"] == ["B", "R", "W"]
+
+    async def test_invalid_commander_colors_raises(self):
+        cards = _bear_cards(63)
+        cards["forest"] = FOREST
+        bulk = _make_bulk(cards)
+        with pytest.raises(ValueError, match="color identity"):
+            await simulate_opening_hands(
+                _basic_deck(),
+                iterations=200,
+                commander_colors="notacolor",
+                bulk=bulk,
+                scryfall=_make_scryfall(cards),
+            )
