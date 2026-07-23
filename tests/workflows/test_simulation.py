@@ -663,6 +663,27 @@ class TestSimulateOpeningHandsV2:
         assert result.data["keep_pct_by_mulligans"]["3plus"] == pytest.approx(1.0)
         assert result.data["mull_reasons"]["no_gas"] == 800
 
+    async def test_mulligan_transparency_derives_from_keep_pct_by_mulligans(self):
+        """keep_first_deal_pct / keep_via_free_mulligan_pct mirror keep_pct_by_mulligans."""
+        cards = _bear_cards(63)
+        cards["forest"] = FOREST
+        bulk = _make_bulk(cards)
+        decklist = _basic_deck()
+
+        result = await simulate_opening_hands(
+            decklist,
+            iterations=500,
+            seed=42,
+            free_mulligan=True,
+            bulk=bulk,
+            scryfall=_make_scryfall(cards),
+        )
+        keep_pct_by_mull = result.data["keep_pct_by_mulligans"]
+        assert result.data["keep_first_deal_pct"] == keep_pct_by_mull["0"]
+        assert result.data["keep_via_free_mulligan_pct"] == keep_pct_by_mull["1"]
+        assert "Kept on the first 7" in result.markdown
+        assert "Saved by the Commander free mulligan" in result.markdown
+
 
 # ---------------------------------------------------------------------------
 # lands_v1 exact reproduction -- bit-for-bit match of the pre-playability output

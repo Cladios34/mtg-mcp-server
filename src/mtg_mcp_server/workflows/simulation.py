@@ -1148,6 +1148,25 @@ async def simulate_opening_hands(
     )
     lines.append("")
 
+    keep_first_deal_pct = stats["keep_pct_by_mulligans"]["0"]
+    keep_via_free_mulligan_pct = stats["keep_pct_by_mulligans"]["1"]
+    lines.append("## Mulligan Transparency")
+    lines.append("")
+    lines.append(
+        f"- Kept on the first 7 (0 mulligans, the deck's true consistency): "
+        f"{keep_first_deal_pct:.1%}"
+    )
+    lines.append(
+        f"- Saved by the Commander free mulligan (kept after exactly 1 mulligan, "
+        f"still 7 cards): {keep_via_free_mulligan_pct:.1%}"
+    )
+    lines.append(f"- Total kept at 7 cards: {stats['keep_pct_by_hand_size'][7]:.1%}")
+    lines.append(
+        "*`free_mulligan` is already simulated above: the first line is what the deck "
+        "does on its own, the second is what the free redraw is covering for it.*"
+    )
+    lines.append("")
+
     lines.append("## Kept Hand Land Distribution")
     lines.append("")
     if keep_rule == "lands_v1":
@@ -1244,6 +1263,8 @@ async def simulate_opening_hands(
         "seed": seed,
         "deck_size": deck_size,
         **stats,
+        "keep_first_deal_pct": keep_first_deal_pct,
+        "keep_via_free_mulligan_pct": keep_via_free_mulligan_pct,
         "card_classes": card_classes,
         "tutors": [t._asdict() for t in tutors],
         "color_screen": color_screen,
