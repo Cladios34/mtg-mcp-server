@@ -91,6 +91,7 @@ class Card(BaseModel):
     oracle_text: str | None = None
     colors: list[str] = Field(default_factory=list)  # Card colors (e.g. ["B", "G", "U"])
     color_identity: list[str] = Field(default_factory=list)  # Commander identity colors
+    produced_mana: list[str] = Field(default_factory=list)  # Mana produced, e.g. ["R", "W"]
     keywords: list[str] = Field(default_factory=list)
     power: str | None = None  # String because some values are "*" or "X"
     toughness: str | None = None
@@ -131,6 +132,16 @@ class Card(BaseModel):
                 data[field] = front[field]
         if not data.get("colors") and front.get("colors"):
             data["colors"] = front["colors"]
+        if not data.get("produced_mana"):
+            produced: list[str] = []
+            for face in faces:
+                if not isinstance(face, dict):
+                    continue
+                for symbol in face.get("produced_mana") or []:
+                    if symbol not in produced:
+                        produced.append(symbol)
+            if produced:
+                data["produced_mana"] = produced
         return data
 
 
