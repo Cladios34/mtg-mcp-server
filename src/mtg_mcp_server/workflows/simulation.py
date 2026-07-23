@@ -875,6 +875,7 @@ def _simulate_once(
         "mulligans": mulligans,
         "mull_reasons": mull_reasons,
         "has_tutor": any(c.is_tutor for c in kept_hand),
+        "kept_hand": kept_hand,
     }
 
 
@@ -897,6 +898,10 @@ def _run_simulation(
     ``commander_colors`` and ``tutor_aware`` are inert by default: the "colors"
     mull-reason count stays 0 and ``tutor_in_hand_pct`` stays 0 unless a caller
     opts into the color-screen / tutor-analysis extensions.
+
+    ``hand_composition`` additionally profiles the KEPT hands (lands, rocks/
+    dorks, tutors, gas, top-end, and per-color sourcing), independent of the
+    keep/bottoming rules above -- it never changes which hands are kept.
     """
     rng = random.Random(seed)
     keep_counts = {7: 0, 6: 0, 5: 0, 4: 0}
@@ -907,6 +912,20 @@ def _run_simulation(
     tutor_in_hand = 0
     mulligan_counts = {"0": 0, "1": 0, "2": 0, "3plus": 0}
     mull_reason_counts = {"screw": 0, "flood": 0, "no_gas": 0, "colors": 0}
+
+    # Hand-composition accumulators (T13): computed once per kept hand, never
+    # inside the keep/bottoming decision itself.
+    deck_source_colors: frozenset[str] = frozenset()
+    for slot in deck:
+        deck_source_colors |= slot.colors
+    hand_lands_total = 0.0
+    hand_ramp_total = 0
+    hand_tutor_total = 0
+    hand_gas_total = 0
+    hand_big_total = 0
+    no_gas_hands = 0
+    big2plus_hands = 0
+    color_hit_counts = {color: 0 for color in deck_source_colors}
 
     for _ in range(iterations):
         result = _simulate_once(
@@ -939,6 +958,41 @@ def _run_simulation(
         for reason in result["mull_reasons"]:
             mull_reason_counts[reason] += 1
 
+        kept_hand = result["kept_hand"]
+        hand_lands_total += _effective_lands(kept_hand, count_mdfc_lands)
+        hand_ramp_total += sum(1 for c in kept_hand if c.cls in (_CardClass.ROCK, _CardClass.DORK))
+        if tutor_aware:
+            hand_tutor_total += sum(1 for c in kept_hand if c.is_tutor)
+        gas_count = sum(
+            1 for c in kept_hand if c.cls is _CardClass.OTHER and c.cmc <= gas_cmc_threshold
+        )
+        hand_gas_total += gas_count
+        if gas_count == 0:
+            no_gas_hands += 1
+        big_count = sum(1 for c in kept_hand if c.cmc >= 6)
+        hand_big_total += big_count
+        if big_count >= 2:
+            big2plus_hands += 1
+        hand_colors: frozenset[str] = frozenset()
+        for c in kept_hand:
+            hand_colors |= c.colors
+        for color in deck_source_colors:
+            if color in hand_colors:
+                color_hit_counts[color] += 1
+
+    hand_composition = {
+        "avg_lands": hand_lands_total / iterations,
+        "avg_rocks_dorks": hand_ramp_total / iterations,
+        "avg_tutors": (hand_tutor_total / iterations) if tutor_aware else None,
+        "avg_gas": hand_gas_total / iterations,
+        "avg_cmc6plus": hand_big_total / iterations,
+        "pct_no_gas": no_gas_hands / iterations,
+        "pct_2plus_cmc6": big2plus_hands / iterations,
+        "color_source_pct": {
+            color: color_hit_counts[color] / iterations for color in sorted(deck_source_colors)
+        },
+    }
+
     return {
         "keep_pct_by_hand_size": {size: count / iterations for size, count in keep_counts.items()},
         "kept_land_distribution": {
@@ -950,6 +1004,7 @@ def _run_simulation(
         "tutor_in_hand_pct": tutor_in_hand / iterations,
         "keep_pct_by_mulligans": {k: v / iterations for k, v in mulligan_counts.items()},
         "mull_reasons": mull_reason_counts,
+        "hand_composition": hand_composition,
     }
 
 
@@ -1204,6 +1259,33 @@ async def simulate_opening_hands(
     lines.append("## Ramp")
     lines.append("")
     lines.append(f"- Mana source cast by turn 2: {stats['ramp_by_turn2_pct']:.1%}")
+    lines.append("")
+
+    hand_composition = stats["hand_composition"]
+    lines.append("## Hand Composition")
+    lines.append("")
+    lines.append("*Averages and rates over KEPT hands only -- does not affect keep/bottom rules.*")
+    lines.append("")
+    lines.append(f"- Avg lands per hand: {hand_composition['avg_lands']:.2f}")
+    lines.append(f"- Avg rocks/dorks per hand: {hand_composition['avg_rocks_dorks']:.2f}")
+    if tutor_aware:
+        lines.append(f"- Avg tutors per hand: {hand_composition['avg_tutors']:.2f}")
+    else:
+        lines.append("- Avg tutors per hand: not tracked (enable `tutor_aware`)")
+    lines.append(
+        f"- Avg gas (cmc <= {gas_cmc_threshold}) per hand: {hand_composition['avg_gas']:.2f}"
+    )
+    lines.append(f"- Avg cmc 6+ cards per hand: {hand_composition['avg_cmc6plus']:.2f}")
+    lines.append(f"- Hands with 0 castable gas: {hand_composition['pct_no_gas']:.1%}")
+    lines.append(f"- Hands with 2+ cmc-6+ cards: {hand_composition['pct_2plus_cmc6']:.1%}")
+    color_source_pct = hand_composition["color_source_pct"]
+    if color_source_pct:
+        color_line = ", ".join(f"{c} {pct:.1%}" for c, pct in color_source_pct.items())
+        lines.append(f"- Hands sourcing each deck color (>= 1 source): {color_line}")
+    lines.append(
+        "*Reading tip: the most underrepresented category above is the one to "
+        "reinforce in the list.*"
+    )
     lines.append("")
 
     color_screen: dict[str, object] = {}

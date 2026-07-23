@@ -971,6 +971,80 @@ class TestPlayabilityExactReproduction:
         assert result["mull_reasons"]["no_gas"] == 0
 
 
+class TestHandComposition:
+    """Kept-hand composition aggregation (T13): lands, ramp, tutors, gas, top-end, colors."""
+
+    _DECK = (
+        [_Slot(_CardClass.LAND, 0, 1, frozenset({"W"}))] * 20
+        + [_Slot(_CardClass.LAND, 0, 1, frozenset({"U"}))] * 16
+        + [_Slot(_CardClass.ROCK, 2, 1, frozenset())] * 5
+        + [_Slot(_CardClass.OTHER, 2, 0, frozenset(), frozenset(), True)] * 2
+        + [_Slot(_CardClass.OTHER, 3, 0)] * 50
+        + [_Slot(_CardClass.OTHER, 7, 0)] * 6
+    )
+
+    def test_known_deck_exact_composition(self):
+        # Reference literals captured via a throwaway _run_simulation run on this
+        # exact 99-card mock deck (20 W lands, 16 U lands, 5 rocks, 2 tutors cmc 2,
+        # 50 gas cmc 3, 6 bombs cmc 7), iterations=500, seed=42, playability defaults,
+        # tutor_aware=True.
+        result = _run_simulation(
+            self._DECK,
+            iterations=500,
+            seed=42,
+            min_lands=2,
+            max_lands=5,
+            count_mdfc_lands=True,
+            keep_rule="playability",
+            free_mulligan=True,
+            gas_cmc_threshold=4,
+            tutor_aware=True,
+        )
+        composition = result["hand_composition"]
+        assert composition["avg_lands"] == 2.876
+        assert composition["avg_rocks_dorks"] == 0.316
+        assert composition["avg_tutors"] == 0.15
+        assert composition["avg_gas"] == 3.376
+        assert composition["avg_cmc6plus"] == 0.364
+        assert composition["pct_no_gas"] == 0.0
+        assert composition["pct_2plus_cmc6"] == 0.054
+        assert composition["color_source_pct"] == {"W": 0.904, "U": 0.8}
+
+    def test_avg_tutors_is_none_without_tutor_aware(self):
+        """avg_tutors reports None (not a false 0) when tutor_aware is off."""
+        result = _run_simulation(
+            self._DECK,
+            iterations=500,
+            seed=42,
+            min_lands=2,
+            max_lands=5,
+            count_mdfc_lands=True,
+            keep_rule="playability",
+            free_mulligan=True,
+            gas_cmc_threshold=4,
+            tutor_aware=False,
+        )
+        assert result["hand_composition"]["avg_tutors"] is None
+
+    async def test_hand_composition_flows_through_simulate_opening_hands(self):
+        """data['hand_composition'] and the markdown section are wired end-to-end."""
+        cards = _bear_cards(63)
+        cards["forest"] = FOREST
+        bulk = _make_bulk(cards)
+
+        result = await simulate_opening_hands(
+            _basic_deck(), iterations=200, seed=1, bulk=bulk, scryfall=_make_scryfall(cards)
+        )
+        composition = result.data["hand_composition"]
+        assert composition["avg_tutors"] is None
+        # Module-level FOREST has no produced_mana: no card in this mock deck
+        # reports a color, so the per-color breakdown is empty (not a fixture bug --
+        # colorless sourcing is a real, documented edge case, see CHANGELOG).
+        assert composition["color_source_pct"] == {}
+        assert "## Hand Composition" in result.markdown
+        assert "Reading tip" in result.markdown
+
+
 class TestSimulateOpeningHandsV3:
     """End-to-end color-screen and tutor extensions via mocked resolution."""
 
