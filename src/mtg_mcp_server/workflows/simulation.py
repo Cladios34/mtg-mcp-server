@@ -349,7 +349,9 @@ def _tutor_destination(lower: str) -> str:
         return "battlefield"
     if "into your graveyard" in lower:
         return "graveyard"
-    if "on top of" in lower:
+    # "on top" (not "on top of"): current Scryfall templating shortens to
+    # "put that card on top." (seen on Vampiric Tutor / Imperial Seal, 2026-07-23).
+    if "on top" in lower:
         return "top"
     if "into your hand" in lower:
         return "hand"

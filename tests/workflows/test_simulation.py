@@ -732,8 +732,9 @@ _VAMPIRIC_TUTOR = _make_card(
     mana_cost="{B}",
     cmc=1.0,
     oracle_text=(
-        "Search your library for a card, then shuffle and put that card on top of it. "
-        "You lose 2 life."
+        # Real current Scryfall templating (2026-07-23): "on top." without "of",
+        # the exact wording that regressed the destination parser once already.
+        "Search your library for a card, then shuffle and put that card on top. You lose 2 life."
     ),
 )
 _WORLDLY_TUTOR = _make_card(
