@@ -1567,6 +1567,24 @@ async def simulate_opening_hands(
         list[str] | None,
         Field(description="Card names to force-classify as non-mana"),
     ] = None,
+    commander_colors: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Commander color identity (e.g. 'mardu', 'WBR', 'boros') to enable the "
+                "playability-rule color screen: hands that cannot source every color are mulliganed"
+            )
+        ),
+    ] = None,
+    tutor_aware: Annotated[
+        bool,
+        Field(
+            description=(
+                "Detect tutors, count cheap ones as gas, and report per-tutor targets plus the "
+                "odds of an opening hand holding a tutor"
+            )
+        ),
+    ] = False,
 ) -> ToolResult:
     """Monte Carlo simulation of opening hands, mulligans, and early mana curve.
 
@@ -1593,6 +1611,8 @@ async def simulate_opening_hands(
             gas_cmc_threshold=gas_cmc_threshold,
             extra_mana_sources=extra_mana_sources,
             exclude_cards=exclude_cards,
+            commander_colors=commander_colors,
+            tutor_aware=tutor_aware,
             bulk=_bulk,
             scryfall=_require_scryfall(),
         )
