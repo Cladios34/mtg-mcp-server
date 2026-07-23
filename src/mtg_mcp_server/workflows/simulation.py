@@ -37,6 +37,16 @@ _RAMP_SPELL_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# Color-aware simulation (v3) parsing constants.
+_COLOR_LETTERS = frozenset("WUBRG")
+# Any land-fetch effect (fetchlands, ramp spells that grab a land).
+_FETCH_RE = re.compile(r"search your library for .{0,80}land", re.IGNORECASE | re.DOTALL)
+# Any "search your library" effect, the coarse tutor signal.
+_TUTOR_SEARCH_RE = re.compile(r"search your library for", re.IGNORECASE)
+# Basic land subtypes -> the mana color they tap for.
+_BASIC_TO_COLOR = {"Plains": "W", "Island": "U", "Swamp": "B", "Mountain": "R", "Forest": "G"}
+_BASIC_SUBTYPES = frozenset(_BASIC_TO_COLOR)
+
 
 # ---------------------------------------------------------------------------
 # Hypergeometric probability (hand_probability tool)
@@ -160,11 +170,19 @@ _RAMP_CLASSES = frozenset({_CardClass.ROCK, _CardClass.DORK, _CardClass.RAMP_SPE
 
 
 class _Slot(NamedTuple):
-    """A single deck slot reduced to only what the simulation loop needs."""
+    """A single deck slot reduced to only what the simulation loop needs.
+
+    The trailing ``colors``/``pips``/``is_tutor`` fields default to empty so
+    positional constructions (``_Slot(cls, cmc, prod)``) stay valid; they are
+    only populated when the color-screen or tutor-analysis features are active.
+    """
 
     cls: _CardClass
     cmc: int
     production: int
+    colors: frozenset[str] = frozenset()
+    pips: frozenset[str] = frozenset()
+    is_tutor: bool = False
 
 
 def _classify_card(
