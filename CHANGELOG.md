@@ -10,9 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `simulate_opening_hands` -- Opening-hand simulation: keep rates, mulligans, net mana per turn, reproducible via `seed` (2026-07-22)
 - `hand_probability` -- Exact hypergeometric probability for card-category counts in opening hands (2026-07-22)
+- `Card.produced_mana` -- the colors/mana a card can produce, unioned across MDFC faces; feeds the v3 color screen (2026-07-23)
 
 ### Changed
 - `simulate_opening_hands` v2 -- playability keep rule (3-turn hand goldfish: development, flood, gas), Commander free mulligan, smarter London bottoming, new `keep_pct_by_mulligans` and `mull_reasons` outputs; legacy behavior via `keep_rule="lands_v1"` + `free_mulligan=false` (2026-07-22)
+- `simulate_opening_hands` v3 -- optional `commander_colors` color screen (mulligans hands that cannot source every commander color, and protects sole color sources when bottoming; playability rule only) and `tutor_aware` tutor analysis (cheap tutors count as gas, per-tutor targets, `tutor_in_hand_pct`); new `color_screen`, `tutors`, and `colors` mull-reason outputs. Both flags default off: output is unchanged without them (2026-07-23)
 
 ### Fixed
 - `complete_deck`: the `commander` parameter is now actually consumed -- suggestions are filtered to the commander's color identity (was accepted-but-unused; green cards were suggested for Mardu decks) (2026-07-22)
@@ -24,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Known limitations
 - Spellbook decklist tools (`spellbook_estimate_bracket`, `spellbook_find_decklist_combos`) silently skip lines prefixed with a quantity ("1 Card Name") -- pass bare card names. `deck_validate` accepts both formats.
 - `complete_deck` category heuristics remain text-based: exile-draw engines (Necropotence), tutors and Land Tax are not counted as card draw; Commander ratios (20+ creatures, 8+ draw) are generic guidelines, not per-deck doctrine.
+- `simulate_opening_hands` color screen: mana rocks are treated as any-color for their own colored production, and a card with no `produced_mana` data (unresolved or sparse bulk entry) contributes no color, so a color-light source can be under-counted.
 
 ## [3.0.0] - 2026-04-03
 
