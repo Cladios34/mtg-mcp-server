@@ -373,6 +373,30 @@ def _classify_tutor(card: Card, cls: _CardClass) -> tuple[str, str, str] | None:
     return constraint, destination, speed
 
 
+def _tutor_matches(constraint: str, card: Card) -> bool:
+    """Whether ``card`` is a legal target for a tutor of the given constraint."""
+    t = card.type_line
+    if constraint in ("creature", "color_creature"):
+        return "Creature" in t
+    if constraint == "artifact_enchantment":
+        return "Artifact" in t or "Enchantment" in t
+    if constraint == "instant_sorcery":
+        return "Instant" in t or "Sorcery" in t
+    if constraint.startswith("subtype:"):
+        return constraint.split(":", 1)[1] in t
+    if constraint == "basic_land":
+        return "Basic" in t and "Land" in t
+    if constraint == "land":
+        return "Land" in t
+    return True  # "any" or unknown: every card qualifies
+
+
+def _tutor_targets(constraint: str, deck_cards: list[Card]) -> tuple[list[str], int]:
+    """Names (sample of up to 12) and total count of a tutor's legal targets."""
+    matches = [c.name for c in deck_cards if _tutor_matches(constraint, c)]
+    return matches[:12], len(matches)
+
+
 async def _resolve_deck(
     decklist: list[str],
     *,
@@ -778,6 +802,8 @@ def _simulate_once(
     keep_rule: Literal["playability", "lands_v1"],
     free_mulligan: bool,
     gas_cmc_threshold: int,
+    commander_colors: frozenset[str] = frozenset(),
+    tutor_aware: bool = False,
 ) -> dict[str, Any]:
     """Simulate one London-mulligan opening hand plus a 5-turn goldfish.
 
@@ -785,7 +811,9 @@ def _simulate_once(
     mulligan redraws a full 7 without bottoming, only the second and later
     mulligans bottom a card. ``keep_rule`` selects between the playability
     rule (hand development, flood, gas -- see :func:`_keep_playability`) and
-    the legacy lands-only rule (:func:`_keep_reason_lands_v1`).
+    the legacy lands-only rule (:func:`_keep_reason_lands_v1`). ``commander_colors``
+    and ``tutor_aware`` drive the color screen and tutor-as-gas extensions; both
+    are inert by default so the legacy behavior is unchanged.
     """
     library = list(deck)
     rng.shuffle(library)
@@ -806,6 +834,7 @@ def _simulate_once(
                 count_mdfc_lands=count_mdfc_lands,
                 max_lands=max_lands,
                 gas_cmc_threshold=gas_cmc_threshold,
+                commander_colors=commander_colors,
             )
             keep_reason = _keep_playability(
                 kept_candidate,
@@ -813,6 +842,8 @@ def _simulate_once(
                 max_lands=max_lands,
                 count_mdfc_lands=count_mdfc_lands,
                 gas_cmc_threshold=gas_cmc_threshold,
+                commander_colors=commander_colors,
+                tutor_aware=tutor_aware,
             )
         else:
             kept_candidate, bottomed = _bottom_cards(hand, bottoms, count_mdfc_lands)
@@ -842,6 +873,7 @@ def _simulate_once(
         "ramp_by_turn2": goldfish["ramp_by_turn2"],
         "mulligans": mulligans,
         "mull_reasons": mull_reasons,
+        "has_tutor": any(c.is_tutor for c in kept_hand),
     }
 
 
@@ -856,16 +888,24 @@ def _run_simulation(
     keep_rule: Literal["playability", "lands_v1"] = "playability",
     free_mulligan: bool = True,
     gas_cmc_threshold: int = 4,
+    commander_colors: frozenset[str] = frozenset(),
+    tutor_aware: bool = False,
 ) -> dict[str, Any]:
-    """Run the Monte Carlo goldfish simulation ``iterations`` times and aggregate."""
+    """Run the Monte Carlo goldfish simulation ``iterations`` times and aggregate.
+
+    ``commander_colors`` and ``tutor_aware`` are inert by default: the "colors"
+    mull-reason count stays 0 and ``tutor_in_hand_pct`` stays 0 unless a caller
+    opts into the color-screen / tutor-analysis extensions.
+    """
     rng = random.Random(seed)
     keep_counts = {7: 0, 6: 0, 5: 0, 4: 0}
     kept_land_totals: dict[float, int] = {}
     spendable_totals = [0.0] * 5
     on_curve_counts = [0] * 5
     ramp_by_turn2 = 0
+    tutor_in_hand = 0
     mulligan_counts = {"0": 0, "1": 0, "2": 0, "3plus": 0}
-    mull_reason_counts = {"screw": 0, "flood": 0, "no_gas": 0}
+    mull_reason_counts = {"screw": 0, "flood": 0, "no_gas": 0, "colors": 0}
 
     for _ in range(iterations):
         result = _simulate_once(
@@ -877,7 +917,11 @@ def _run_simulation(
             keep_rule=keep_rule,
             free_mulligan=free_mulligan,
             gas_cmc_threshold=gas_cmc_threshold,
+            commander_colors=commander_colors,
+            tutor_aware=tutor_aware,
         )
+        if result["has_tutor"]:
+            tutor_in_hand += 1
         keep_counts[result["hand_size"]] += 1
         lands = result["effective_lands"]
         kept_land_totals[lands] = kept_land_totals.get(lands, 0) + 1
@@ -902,6 +946,7 @@ def _run_simulation(
         "avg_spendable_mana_by_turn": {i + 1: spendable_totals[i] / iterations for i in range(5)},
         "on_curve_pct_by_turn": {i + 1: on_curve_counts[i] / iterations for i in range(5)},
         "ramp_by_turn2_pct": ramp_by_turn2 / iterations,
+        "tutor_in_hand_pct": tutor_in_hand / iterations,
         "keep_pct_by_mulligans": {k: v / iterations for k, v in mulligan_counts.items()},
         "mull_reasons": mull_reason_counts,
     }

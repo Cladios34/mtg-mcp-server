@@ -20,6 +20,7 @@ from mtg_mcp_server.workflows.simulation import (
     _run_simulation,
     _Slot,
     _source_colors,
+    _tutor_targets,
     hand_probability,
     simulate_opening_hands,
 )
@@ -807,6 +808,42 @@ class TestClassifyTutor:
         for card in (arid_mesa, RAMPANT_GROWTH):
             cls = _classify_card(card, extra_mana_sources=frozenset(), exclude_cards=frozenset())
             assert _classify_tutor(card, cls) is None
+
+
+class TestTutorTargetsAndAggregation:
+    """Real target counting (T14) and Monte-Carlo tutor aggregation."""
+
+    def test_creature_tutor_target_count(self):
+        deck_cards = [_make_card(f"Beast {i}", type_line="Creature - Beast") for i in range(5)]
+        deck_cards += [
+            _make_card("Sol Ring", type_line="Artifact", mana_cost="{1}"),
+            _make_card("Counterspell", type_line="Instant", mana_cost="{U}{U}"),
+            _make_card("Forest", type_line="Basic Land - Forest", mana_cost=None),
+        ]
+        names, count = _tutor_targets("creature", deck_cards)
+        assert count == 5
+        assert all("Beast" in n for n in names)
+
+    def test_any_tutor_counts_every_card(self):
+        deck_cards = [_make_card(f"Beast {i}", type_line="Creature - Beast") for i in range(3)]
+        _, count = _tutor_targets("any", deck_cards)
+        assert count == 3
+
+    def test_run_simulation_reports_tutor_in_hand(self):
+        tutor = _Slot(_CardClass.OTHER, 2, 0, frozenset(), frozenset(), True)
+        deck = [_Slot(_CardClass.LAND, 0, 1)] * 36 + [tutor] * 63
+        stats = _run_simulation(
+            deck,
+            iterations=200,
+            seed=42,
+            min_lands=2,
+            max_lands=5,
+            count_mdfc_lands=True,
+            tutor_aware=True,
+            commander_colors=frozenset(),
+        )
+        assert stats["tutor_in_hand_pct"] > 0.9
+        assert "colors" in stats["mull_reasons"]
 
 
 class TestSourceColors:
