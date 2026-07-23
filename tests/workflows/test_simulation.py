@@ -12,6 +12,7 @@ from mtg_mcp_server.workflows.simulation import (
     _bottom_cards_playability,
     _CardClass,
     _classify_card,
+    _classify_tutor,
     _goldfish,
     _hypergeom_pmf,
     _keep_playability,
@@ -694,6 +695,118 @@ class TestLandsV1ExactReproduction:
             4.0: 0.162,
             5.0: 0.038,
         }
+
+
+_DEMONIC_TUTOR = _make_card(
+    "Demonic Tutor",
+    type_line="Sorcery",
+    mana_cost="{1}{B}",
+    cmc=2.0,
+    oracle_text="Search your library for a card and put that card into your hand, then shuffle.",
+)
+_VAMPIRIC_TUTOR = _make_card(
+    "Vampiric Tutor",
+    type_line="Instant",
+    mana_cost="{B}",
+    cmc=1.0,
+    oracle_text=(
+        "Search your library for a card, then shuffle and put that card on top of it. "
+        "You lose 2 life."
+    ),
+)
+_WORLDLY_TUTOR = _make_card(
+    "Worldly Tutor",
+    type_line="Instant",
+    mana_cost="{G}",
+    cmc=1.0,
+    oracle_text=(
+        "Search your library for a creature card, reveal that card, then shuffle and put "
+        "that card on top of it."
+    ),
+)
+_ENTOMB = _make_card(
+    "Entomb",
+    type_line="Instant",
+    mana_cost="{B}",
+    cmc=1.0,
+    oracle_text="Search your library for a card, put that card into your graveyard, then shuffle.",
+)
+_ENLIGHTENED_TUTOR = _make_card(
+    "Enlightened Tutor",
+    type_line="Instant",
+    mana_cost="{W}",
+    cmc=1.0,
+    oracle_text=(
+        "Search your library for an artifact or enchantment card, reveal that card, then "
+        "shuffle and put that card on top of it."
+    ),
+)
+_GREEN_SUNS_ZENITH = _make_card(
+    "Green Sun's Zenith",
+    type_line="Sorcery",
+    mana_cost="{X}{G}",
+    cmc=1.0,
+    oracle_text=(
+        "Search your library for a green creature card with mana value X or less, put it "
+        "onto the battlefield, then shuffle. Shuffle Green Sun's Zenith into its owner's library."
+    ),
+)
+_CHORD_OF_CALLING = _make_card(
+    "Chord of Calling",
+    type_line="Instant",
+    mana_cost="{X}{G}{G}{G}",
+    cmc=3.0,
+    oracle_text=(
+        "Convoke. Flash. Search your library for a creature card, put it onto the "
+        "battlefield, then shuffle."
+    ),
+)
+_LAND_TAX = _make_card(
+    "Land Tax",
+    type_line="Enchantment",
+    mana_cost="{W}",
+    cmc=1.0,
+    oracle_text=(
+        "Whenever an opponent controls more lands than you, you may search your library "
+        "for up to three basic land cards, reveal them, put them into your hand, then shuffle."
+    ),
+)
+
+
+class TestClassifyTutor:
+    """Static tutor classification (T12) and non-tutor exclusions (T13)."""
+
+    @pytest.mark.parametrize(
+        ("card", "expected"),
+        [
+            (_DEMONIC_TUTOR, ("any", "hand", "sorcery")),
+            (_VAMPIRIC_TUTOR, ("any", "top", "instant")),
+            (_WORLDLY_TUTOR, ("creature", "top", "instant")),
+            (_ENTOMB, ("any", "graveyard", "instant")),
+            (_ENLIGHTENED_TUTOR, ("artifact_enchantment", "top", "instant")),
+            (_GREEN_SUNS_ZENITH, ("color_creature", "battlefield", "sorcery")),
+            (_CHORD_OF_CALLING, ("creature", "battlefield", "instant")),
+            (_LAND_TAX, ("basic_land", "hand", "sorcery")),
+        ],
+    )
+    def test_classify_known_tutors(self, card: Card, expected: tuple[str, str, str]):
+        cls = _classify_card(card, extra_mana_sources=frozenset(), exclude_cards=frozenset())
+        assert _classify_tutor(card, cls) == expected
+
+    def test_fetchland_and_ramp_spell_are_not_tutors(self):
+        arid_mesa = _make_card(
+            "Arid Mesa",
+            type_line="Land",
+            mana_cost=None,
+            cmc=0.0,
+            oracle_text=(
+                "{T}, Pay 1 life, Sacrifice Arid Mesa: Search your library for a "
+                "Mountain or Plains card, put it onto the battlefield, then shuffle."
+            ),
+        )
+        for card in (arid_mesa, RAMPANT_GROWTH):
+            cls = _classify_card(card, extra_mana_sources=frozenset(), exclude_cards=frozenset())
+            assert _classify_tutor(card, cls) is None
 
 
 class TestSourceColors:

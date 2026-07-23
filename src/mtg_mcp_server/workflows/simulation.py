@@ -47,6 +47,13 @@ _TUTOR_SEARCH_RE = re.compile(r"search your library for", re.IGNORECASE)
 _BASIC_TO_COLOR = {"Plains": "W", "Island": "U", "Swamp": "B", "Mountain": "R", "Forest": "G"}
 _BASIC_SUBTYPES = frozenset(_BASIC_TO_COLOR)
 
+# Tutor parsing (v3). Color words that qualify a creature tutor ("green creature card").
+_TUTOR_COLOR_WORDS = frozenset({"white", "blue", "black", "red", "green"})
+# Creature subtypes a tutor may name (case preserved so target matching stays exact).
+_TUTOR_SUBTYPES = frozenset(
+    {"Elf", "Goblin", "Dragon", "Angel", "Zombie", "Wizard", "Cleric", "Merfolk", "Rebel", "Ally"}
+)
+
 
 # ---------------------------------------------------------------------------
 # Hypergeometric probability (hand_probability tool)
@@ -297,6 +304,73 @@ def _deck_land_colors(
         ):
             colors |= frozenset(card.produced_mana) & _COLOR_LETTERS
     return frozenset(colors)
+
+
+class _TutorInfo(NamedTuple):
+    """A detected tutor and what it fetches, for the tutor-analysis report."""
+
+    name: str
+    target_constraint: str
+    destination: str
+    speed: str
+    target_names: list[str]
+    target_count: int
+
+
+def _tutor_constraint(oracle: str, lower: str) -> str:
+    """Best-effort category of what a tutor searches for (first match wins).
+
+    Fixed order: color creature, creature, artifact/enchantment, instant/sorcery,
+    named creature subtype, basic land, land, then unconstrained ("any").
+    """
+    has_creature = "creature card" in lower or "creature spell" in lower
+    if has_creature and any(w in lower for w in _TUTOR_COLOR_WORDS):
+        return "color_creature"
+    if has_creature:
+        return "creature"
+    if "artifact" in lower or "enchantment" in lower:
+        return "artifact_enchantment"
+    if "instant" in lower or "sorcery" in lower:
+        return "instant_sorcery"
+    for sub in _TUTOR_SUBTYPES:
+        if sub in oracle:
+            return f"subtype:{sub}"
+    if "basic land" in lower:
+        return "basic_land"
+    if "land" in lower:
+        return "land"
+    return "any"
+
+
+def _tutor_destination(lower: str) -> str:
+    """Where a tutor puts the fetched card (checked in a fixed order)."""
+    if "onto the battlefield" in lower:
+        return "battlefield"
+    if "into your graveyard" in lower:
+        return "graveyard"
+    if "on top of" in lower:
+        return "top"
+    if "into your hand" in lower:
+        return "hand"
+    return "hand"
+
+
+def _classify_tutor(card: Card, cls: _CardClass) -> tuple[str, str, str] | None:
+    """Classify a tutor as ``(constraint, destination, speed)``, or None.
+
+    Lands, MDFC lands, and land-fetch ramp spells are never tutors (excluded by
+    class). A tutor must search the library; otherwise returns None.
+    """
+    if cls in (_CardClass.LAND, _CardClass.MDFC_LAND, _CardClass.RAMP_SPELL):
+        return None
+    oracle = card.oracle_text or ""
+    if not _TUTOR_SEARCH_RE.search(oracle):
+        return None
+    lower = oracle.lower()
+    constraint = _tutor_constraint(oracle, lower)
+    destination = _tutor_destination(lower)
+    speed = "instant" if "Instant" in card.type_line or "flash" in lower else "sorcery"
+    return constraint, destination, speed
 
 
 async def _resolve_deck(
