@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 import structlog
 
 from mtg_mcp_server.utils.decklist import parse_decklist
+from mtg_mcp_server.utils.mana import count_pips
 from mtg_mcp_server.workflows import WorkflowResult
 
 if TYPE_CHECKING:
@@ -39,9 +40,8 @@ _RAMP_SPELL_RE = re.compile(
 
 # Color-aware simulation (v3) parsing constants.
 _COLOR_LETTERS = frozenset("WUBRG")
-# Any land-fetch effect (fetchlands, ramp spells that grab a land).
-_FETCH_RE = re.compile(r"search your library for .{0,80}land", re.IGNORECASE | re.DOTALL)
-# Any "search your library" effect, the coarse tutor signal.
+# Any "search your library" effect: the coarse tutor signal, and the marker that a
+# land is a fetch (typed fetchlands say "for a Mountain or Plains card", no "land" word).
 _TUTOR_SEARCH_RE = re.compile(r"search your library for", re.IGNORECASE)
 # Basic land subtypes -> the mana color they tap for.
 _BASIC_TO_COLOR = {"Plains": "W", "Island": "U", "Swamp": "B", "Mountain": "R", "Forest": "G"}
@@ -244,6 +244,59 @@ def _mana_production(card: Card | None, cls: _CardClass) -> int:
                 return max(len(_MANA_SYMBOL_RE.findall(line)), 1)
         return 1
     return 0
+
+
+def _fetch_colors(card: Card, deck_land_colors: frozenset[str]) -> frozenset[str]:
+    """Colors a land-fetch effect resolves to, deck-aware.
+
+    If the oracle names specific basic land subtypes (e.g. a fetchland that
+    grabs a "Mountain or Plains"), return those subtypes' colors. Otherwise
+    (a generic "search for a basic land" ramp spell) fall back to the union of
+    every non-fetch land color the deck actually runs.
+    """
+    oracle = card.oracle_text or ""
+    named = frozenset(color for sub, color in _BASIC_TO_COLOR.items() if sub in oracle)
+    return named or deck_land_colors
+
+
+def _source_colors(
+    card: Card, cls: _CardClass, *, deck_land_colors: frozenset[str]
+) -> frozenset[str]:
+    """Colors a classified card can add to the mana pool (WUBRG only).
+
+    Non-fetch lands, rocks, and dorks report their own ``produced_mana``;
+    fetchlands and land-fetch ramp spells report deck-aware fetch colors;
+    ``OTHER`` cards produce no mana, hence no color.
+    """
+    if cls is _CardClass.OTHER:
+        return frozenset()
+    if cls is _CardClass.RAMP_SPELL:
+        return _fetch_colors(card, deck_land_colors)
+    if cls in (_CardClass.LAND, _CardClass.MDFC_LAND) and _TUTOR_SEARCH_RE.search(
+        card.oracle_text or ""
+    ):
+        return _fetch_colors(card, deck_land_colors)
+    return frozenset(card.produced_mana) & _COLOR_LETTERS
+
+
+def _deck_land_colors(
+    cards: dict[str, Card], *, extra_mana_sources: frozenset[str], exclude_cards: frozenset[str]
+) -> frozenset[str]:
+    """Union of colors produced by every non-fetch land resolved in the deck.
+
+    Precomputed once (never inside the Monte Carlo loop) so generic land-fetch
+    effects can pin onto whatever lands the deck actually runs.
+    """
+    colors: set[str] = set()
+    for card in cards.values():
+        cls = _classify_card(
+            card, extra_mana_sources=extra_mana_sources, exclude_cards=exclude_cards
+        )
+        if cls in (_CardClass.LAND, _CardClass.MDFC_LAND) and not _TUTOR_SEARCH_RE.search(
+            card.oracle_text or ""
+        ):
+            colors |= frozenset(card.produced_mana) & _COLOR_LETTERS
+    return frozenset(colors)
 
 
 async def _resolve_deck(
@@ -790,6 +843,10 @@ async def simulate_opening_hands(
     extra_set = frozenset(n.lower() for n in (extra_mana_sources or []))
     exclude_set = frozenset(n.lower() for n in (exclude_cards or []))
 
+    deck_land_colors = _deck_land_colors(
+        cards_by_name, extra_mana_sources=extra_set, exclude_cards=exclude_set
+    )
+
     card_classes: dict[str, list[str]] = {c.name: [] for c in _CardClass}
     slot_by_key: dict[str, _Slot] = {}
     for name in dict.fromkeys(name for _, name in slots):
@@ -799,14 +856,18 @@ async def simulate_opening_hands(
             cls = _classify_card(card, extra_mana_sources=extra_set, exclude_cards=exclude_set)
             cmc_int = round(card.cmc)
             display_name = card.name
+            colors = _source_colors(card, cls, deck_land_colors=deck_land_colors)
+            pips = frozenset(count_pips(card.mana_cost)) & _COLOR_LETTERS
         else:
             cls = (
                 _CardClass.ROCK if key in extra_set and key not in exclude_set else _CardClass.OTHER
             )
             cmc_int = 0
             display_name = name
+            colors = frozenset()
+            pips = frozenset()
         production = _mana_production(card, cls)
-        slot_by_key[key] = _Slot(cls, cmc_int, production)
+        slot_by_key[key] = _Slot(cls, cmc_int, production, colors, pips)
         card_classes[cls.name].append(display_name)
 
     deck: list[_Slot] = []

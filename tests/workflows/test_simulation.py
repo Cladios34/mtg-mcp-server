@@ -18,6 +18,7 @@ from mtg_mcp_server.workflows.simulation import (
     _mana_production,
     _run_simulation,
     _Slot,
+    _source_colors,
     hand_probability,
     simulate_opening_hands,
 )
@@ -90,6 +91,7 @@ def _make_card(
     mana_cost: str | None = "{1}{G}{G}",
     cmc: float = 3.0,
     oracle_text: str | None = None,
+    produced_mana: list[str] | None = None,
 ) -> Card:
     return Card(
         id="test-id-" + name.lower().replace(" ", "-").replace(",", ""),
@@ -98,6 +100,7 @@ def _make_card(
         cmc=cmc,
         type_line=type_line,
         oracle_text=oracle_text,
+        produced_mana=produced_mana or [],
         prices=CardPrices(usd="1.00"),
         rarity="common",
     )
@@ -641,6 +644,71 @@ class TestLandsV1ExactReproduction:
             4.0: 0.162,
             5.0: 0.038,
         }
+
+
+class TestSourceColors:
+    """Deck-aware color sourcing for the v3 color screen (T4-T7)."""
+
+    def test_basic_land_reports_its_color(self):
+        forest = _make_card(
+            "Forest", type_line="Basic Land - Forest", mana_cost=None, cmc=0.0, produced_mana=["G"]
+        )
+        cls = _classify_card(forest, extra_mana_sources=frozenset(), exclude_cards=frozenset())
+        assert _source_colors(forest, cls, deck_land_colors=frozenset()) == frozenset({"G"})
+
+    def test_fetchland_named_subtypes_deck_aware(self):
+        arid_mesa = _make_card(
+            "Arid Mesa",
+            type_line="Land",
+            mana_cost=None,
+            cmc=0.0,
+            oracle_text=(
+                "{T}, Pay 1 life, Sacrifice Arid Mesa: Search your library for a "
+                "Mountain or Plains card, put it onto the battlefield, then shuffle."
+            ),
+            produced_mana=[],
+        )
+        cls = _classify_card(arid_mesa, extra_mana_sources=frozenset(), exclude_cards=frozenset())
+        assert cls == _CardClass.LAND
+        assert _source_colors(arid_mesa, cls, deck_land_colors=frozenset({"U"})) == frozenset(
+            {"R", "W"}
+        )
+
+    def test_command_tower_reports_all_five(self):
+        tower = _make_card(
+            "Command Tower",
+            type_line="Land",
+            mana_cost=None,
+            cmc=0.0,
+            oracle_text="{T}: Add one mana of any color in your commander's color identity.",
+            produced_mana=["W", "U", "B", "R", "G"],
+        )
+        cls = _classify_card(tower, extra_mana_sources=frozenset(), exclude_cards=frozenset())
+        assert _source_colors(tower, cls, deck_land_colors=frozenset()) == frozenset(
+            {"W", "U", "B", "R", "G"}
+        )
+
+    def test_colorless_rock_filtered_to_empty(self):
+        rock = _make_card(
+            "Sol Ring",
+            type_line="Artifact",
+            mana_cost="{1}",
+            cmc=1.0,
+            oracle_text="{T}: Add {C}{C}.",
+            produced_mana=["C"],
+        )
+        cls = _classify_card(rock, extra_mana_sources=frozenset(), exclude_cards=frozenset())
+        assert cls == _CardClass.ROCK
+        assert _source_colors(rock, cls, deck_land_colors=frozenset()) == frozenset()
+
+    def test_generic_fetch_ramp_uses_deck_colors(self):
+        cls = _classify_card(
+            RAMPANT_GROWTH, extra_mana_sources=frozenset(), exclude_cards=frozenset()
+        )
+        assert cls == _CardClass.RAMP_SPELL
+        assert _source_colors(
+            RAMPANT_GROWTH, cls, deck_land_colors=frozenset({"G", "W"})
+        ) == frozenset({"G", "W"})
 
 
 class TestPlayabilityExactReproduction:
