@@ -375,6 +375,27 @@ def _keep_reason_lands_v1(
     return None
 
 
+def _hand_color_sources(hand: list[_Slot]) -> frozenset[str]:
+    """Union of the colors every mana source in the hand can produce."""
+    sources: set[str] = set()
+    for c in hand:
+        sources |= c.colors
+    return frozenset(sources)
+
+
+def _keep_reason_colors(hand: list[_Slot], *, commander_colors: frozenset[str]) -> str | None:
+    """Color-screen check: fail if the hand cannot source every commander color.
+
+    Inert (always ``None``) when ``commander_colors`` is empty, so the color
+    screen only fires when the caller opts in via ``commander_colors``.
+    """
+    if not commander_colors:
+        return None
+    if commander_colors <= _hand_color_sources(hand):
+        return None
+    return "colors"
+
+
 def _keep_playability(
     hand: list[_Slot],
     *,
@@ -382,8 +403,10 @@ def _keep_playability(
     max_lands: int,
     count_mdfc_lands: bool,
     gas_cmc_threshold: int,
+    commander_colors: frozenset[str] = frozenset(),
+    tutor_aware: bool = False,
 ) -> str | None:
-    """Playability keep rule: hand development speed, flood, and castable gas.
+    """Playability keep rule: hand development speed, flood, castable gas, colors.
 
     Checked in this fixed order, the first failing check wins:
 
@@ -392,7 +415,10 @@ def _keep_playability(
        too slow to develop even accounting for rocks/dorks/ramp spells.
     2. "flood" -- more effective lands than ``max_lands``.
     3. "no_gas" -- no non-land, non-ramp card at or below ``gas_cmc_threshold``
-       mana value to actually do something with the mana.
+       mana value to actually do something with the mana. Under ``tutor_aware``,
+       a tutor at or below the threshold also counts as gas (it can find some).
+    4. "colors" -- the hand cannot source every ``commander_colors`` color
+       (inert when ``commander_colors`` is empty).
 
     Returns ``None`` if the hand is keepable.
     """
@@ -401,12 +427,17 @@ def _keep_playability(
     if _effective_lands(hand, count_mdfc_lands) > max_lands:
         return "flood"
     has_gas = any(
-        c.cls in (_CardClass.OTHER, _CardClass.RAMP_SPELL) and c.cmc <= gas_cmc_threshold
+        (
+            c.cls in (_CardClass.OTHER, _CardClass.RAMP_SPELL)
+            and not c.is_tutor
+            and c.cmc <= gas_cmc_threshold
+        )
+        or (tutor_aware and c.is_tutor and c.cmc <= gas_cmc_threshold)
         for c in hand
     )
     if not has_gas:
         return "no_gas"
-    return None
+    return _keep_reason_colors(hand, commander_colors=commander_colors)
 
 
 def _bottom_cards(

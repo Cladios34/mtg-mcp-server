@@ -510,6 +510,44 @@ class TestKeepPlayability:
         assert _keep_playability(hand, **no_mdfc_kwargs) == "screw"
 
 
+class TestKeepPlayabilityColorAndTutor:
+    """Color screen (T8, T9) and tutor-as-gas (T15) extensions to the keep rule."""
+
+    def _white_hand(self) -> list[_Slot]:
+        white_land = _Slot(_CardClass.LAND, 0, 1, frozenset({"W"}))
+        gas = _Slot(_CardClass.OTHER, 2, 0)
+        return [white_land, white_land, gas, gas, gas, gas, gas]
+
+    def test_color_screen_inert_without_commander_colors(self):
+        assert _keep_playability(self._white_hand(), **_KEEP_PLAYABILITY_KWARGS) is None
+
+    def test_color_screen_passes_when_all_colors_sourced(self):
+        assert (
+            _keep_playability(
+                self._white_hand(), commander_colors=frozenset({"W"}), **_KEEP_PLAYABILITY_KWARGS
+            )
+            is None
+        )
+
+    def test_color_screen_fails_when_a_color_is_missing(self):
+        assert (
+            _keep_playability(
+                self._white_hand(),
+                commander_colors=frozenset({"W", "U"}),
+                **_KEEP_PLAYABILITY_KWARGS,
+            )
+            == "colors"
+        )
+
+    def test_tutor_is_no_gas_without_flag_but_gas_with_flag(self):
+        land = _Slot(_CardClass.LAND, 0, 1)
+        tutor = _Slot(_CardClass.OTHER, 2, 0, frozenset(), frozenset(), True)
+        big = _Slot(_CardClass.OTHER, 6, 0)
+        hand = [land, land, tutor, big, big, big, big]
+        assert _keep_playability(hand, **_KEEP_PLAYABILITY_KWARGS) == "no_gas"
+        assert _keep_playability(hand, tutor_aware=True, **_KEEP_PLAYABILITY_KWARGS) is None
+
+
 # ---------------------------------------------------------------------------
 # _bottom_cards_playability -- London mulligan bottoming, direct calls
 # ---------------------------------------------------------------------------
