@@ -573,6 +573,18 @@ class TestBottomCardsPlayability:
         assert [c.cmc for c in bottomed] == [6, 5]
         assert any(c.cmc == 2 for c in remaining)
 
+    def test_sole_color_source_land_is_never_bottomed(self):
+        red_land = _Slot(_CardClass.LAND, 0, 1, frozenset({"R"}))
+        white_lands = [_Slot(_CardClass.LAND, 0, 1, frozenset({"W"})) for _ in range(5)]
+        gas = _Slot(_CardClass.OTHER, 2, 0)
+        hand = [*white_lands, red_land, gas]
+        remaining, bottomed = _bottom_cards_playability(
+            hand, 3, commander_colors=frozenset({"R", "W"}), **_BOTTOM_PLAYABILITY_KWARGS
+        )
+        assert red_land in remaining
+        assert red_land not in bottomed
+        assert all(c.cls == _CardClass.LAND for c in bottomed)
+
 
 # ---------------------------------------------------------------------------
 # simulate_opening_hands -- playability keep rule, end-to-end via mocks

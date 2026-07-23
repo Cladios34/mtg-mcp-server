@@ -475,6 +475,22 @@ def _bottom_cards(
     return remaining, bottomed
 
 
+def _is_sole_source(remaining: list[_Slot], idx: int, commander_colors: frozenset[str]) -> bool:
+    """True if slot ``idx`` is the only card sourcing some commander color.
+
+    Always False when ``commander_colors`` is empty, so color-aware bottoming is
+    a no-op unless the caller opts in.
+    """
+    unique = remaining[idx].colors & commander_colors
+    if not unique:
+        return False
+    others: set[str] = set()
+    for i, c in enumerate(remaining):
+        if i != idx:
+            others |= c.colors
+    return not (unique <= others)
+
+
 def _bottom_cards_playability(
     hand: list[_Slot],
     n: int,
@@ -482,6 +498,7 @@ def _bottom_cards_playability(
     count_mdfc_lands: bool,
     max_lands: int,
     gas_cmc_threshold: int,
+    commander_colors: frozenset[str] = frozenset(),
 ) -> tuple[list[_Slot], list[_Slot]]:
     """Select ``n`` cards to bottom for a London mulligan (playability rule).
 
@@ -496,6 +513,10 @@ def _bottom_cards_playability(
     3. Otherwise, bottom the most expensive ROCK/DORK.
     4. Otherwise, bottom the first remaining land, then the protected gas
        card, then whatever is left at index 0.
+
+    When ``commander_colors`` is set, a land that is the sole source of a
+    commander color is protected from the land-cut branches; if every candidate
+    land is a sole source, the branch falls back to its default pick (never stalls).
     """
     remaining = list(hand)
     bottomed: list[_Slot] = []
@@ -511,7 +532,18 @@ def _bottom_cards_playability(
         effective = _effective_lands(remaining, count_mdfc_lands)
 
         if effective > land_cap and land_indices:
-            idx = pure_land_indices[0] if pure_land_indices else land_indices[0]
+            keep_pure = [
+                i for i in pure_land_indices if not _is_sole_source(remaining, i, commander_colors)
+            ]
+            keep_any = [
+                i for i in land_indices if not _is_sole_source(remaining, i, commander_colors)
+            ]
+            if keep_pure:
+                idx = keep_pure[0]
+            elif keep_any:
+                idx = keep_any[0]
+            else:
+                idx = pure_land_indices[0] if pure_land_indices else land_indices[0]
             bottomed.append(remaining.pop(idx))
             continue
 
@@ -540,7 +572,12 @@ def _bottom_cards_playability(
             bottomed.append(remaining.pop(idx))
             continue
 
-        if land_indices:
+        keep_lands = [
+            i for i in land_indices if not _is_sole_source(remaining, i, commander_colors)
+        ]
+        if keep_lands:
+            idx = keep_lands[0]
+        elif land_indices:
             idx = land_indices[0]
         elif protected_idx is not None:
             idx = protected_idx
