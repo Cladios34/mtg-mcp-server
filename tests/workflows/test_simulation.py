@@ -1083,6 +1083,23 @@ class TestSimulateOpeningHandsV3:
         )
         assert result.data["params"]["commander_colors"] == ["B", "R", "W"]
 
+    async def test_color_screen_reports_deck_color_demand_from_pips(self):
+        """Color Screen consumes _Slot.pips: colored-pip demand across the deck's spells."""
+        cards = _bear_cards(63)  # each Bear defaults to mana_cost "{1}{G}{G}"
+        cards["forest"] = FOREST
+        bulk = _make_bulk(cards)
+
+        result = await simulate_opening_hands(
+            _basic_deck(),
+            iterations=200,
+            seed=1,
+            commander_colors="G",
+            bulk=bulk,
+            scryfall=_make_scryfall(cards),
+        )
+        assert "Deck color demand" in result.markdown
+        assert "G:63" in result.markdown
+
     async def test_invalid_commander_colors_raises(self):
         cards = _bear_cards(63)
         cards["forest"] = FOREST

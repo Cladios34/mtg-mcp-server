@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Spellbook decklist tools (`spellbook_estimate_bracket`, `spellbook_find_decklist_combos`) silently skip lines prefixed with a quantity ("1 Card Name") -- pass bare card names. `deck_validate` accepts both formats.
 - `complete_deck` category heuristics remain text-based: exile-draw engines (Necropotence), tutors and Land Tax are not counted as card draw; Commander ratios (20+ creatures, 8+ draw) are generic guidelines, not per-deck doctrine.
 - `simulate_opening_hands` color screen: mana rocks are treated as any-color for their own colored production, and a card with no `produced_mana` data (unresolved or sparse bulk entry) contributes no color, so a color-light source can be under-counted.
+- `simulate_opening_hands` `tutor_aware`: conditional-trigger tutors (Land Tax and similar "whenever" searchers) count as castable gas like any cheap tutor, even though they cannot actually be cast on demand -- assumed v1 imprecision (2026-07-23)
 
 ## [3.0.0] - 2026-04-03
 
@@ -75,15 +76,15 @@ tools retain their parameters and behavior.
 ## [2.1.0] - 2026-04-02
 
 ### Added
-- `limit` parameter on `scryfall_search_cards` (default 30), `draft_card_ratings` (default 50), and `edhrec_commander_staples` (default 10 per category) — pass `limit=0` for all results
-- `sort_by` parameter on `draft_card_ratings` — sort by `gih_wr` (default), `alsa`, `iwd`, or `name`
-- `response_format` parameter on `draft_card_ratings` and `edhrec_commander_staples` — `"concise"` mode for shorter output
+- `limit` parameter on `scryfall_search_cards` (default 30), `draft_card_ratings` (default 50), and `edhrec_commander_staples` (default 10 per category): pass `limit=0` for all results
+- `sort_by` parameter on `draft_card_ratings`: sort by `gih_wr` (default), `alsa`, `iwd`, or `name`
+- `response_format` parameter on `draft_card_ratings` and `edhrec_commander_staples`: `"concise"` mode for shorter output
 - Resource URI hints in structured_content: `full_data_uri` on `draft_card_ratings`, `card_detail_uri_template` on `scryfall_search_cards`
 - `showing` count in structured_content for tools with limit parameters
 - Middleware tool name verification test in orchestrator
 
 ### Changed
-- Structured_content uses slim field sets instead of full `model_dump()` — 83-97% size reduction on heavy tools
+- Structured_content uses slim field sets instead of full `model_dump()`: 83-97% size reduction on heavy tools
   - `slim_card()`: name, mana_cost, type_line, rarity, price_usd, edhrec_rank
   - `slim_rating()`: name, color, rarity, gih_wr, alsa, iwd, game_count
   - `slim_edhrec_card()`: name, synergy, inclusion, num_decks

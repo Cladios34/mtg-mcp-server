@@ -1141,6 +1141,14 @@ async def simulate_opening_hands(
         slot_by_key[key] = _Slot(cls, cmc_int, production, colors, pips, is_tutor)
         card_classes[cls.name].append(display_name)
 
+    # Deck-wide colored-pip demand (quantity-weighted), computed once at
+    # classification -- never inside the Monte Carlo loop. Consumed by the
+    # Color Screen section below.
+    pip_demand: dict[str, int] = {}
+    for qty, name in slots:
+        for color in slot_by_key[name.lower()].pips:
+            pip_demand[color] = pip_demand.get(color, 0) + qty
+
     deck: list[_Slot] = []
     for qty, name in slots:
         deck.extend([slot_by_key[name.lower()]] * qty)
@@ -1299,6 +1307,9 @@ async def simulate_opening_hands(
         lines.append("")
         lines.append(f"- Commander colors: {', '.join(sorted(parsed_colors))}")
         lines.append(f"- Hands mulliganed for missing a color: {color_mull_pct:.1%}")
+        if pip_demand:
+            demand_str = ", ".join(f"{c}:{pip_demand[c]}" for c in sorted(pip_demand))
+            lines.append(f"- Deck color demand (colored pips across spells): {demand_str}")
         lines.append(
             "*A hand is screened out when it cannot source every commander color "
             "(playability rule only).*"
