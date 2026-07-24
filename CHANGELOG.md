@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `deck_audit_bundle` -- composite Commander audit: runs deck_validate, deck_analysis, Spellbook decklist combos, bracket estimate, and the v3 opening-hand simulation CONCURRENTLY in one call. Every section carries an explicit ok/error status and echoes the parameters it used (silent-failure ban); a failed section never fails the bundle. `commander_colors` is required and `tutor_aware` is forced on, so a color-blind simulation cannot happen by omission (2026-07-24)
 - `scripts/parallel_probe.mjs` -- concurrency regression probe for the streamable-http transport: verifies concurrent tools/call responses are never cross-wired (JSON-RPC id + content-marker checks, local and upstream tool batches, fresh-card rotation to defeat caching). Background: cross-contaminated responses observed 2026-07-22 under FastMCP 3.3.1, root-caused to upstream session handling (fixed by 3.4.x), verified clean 42/42 on 3.4.4. Re-run after every FastMCP upgrade (2026-07-24)
 - `simulate_opening_hands` -- Opening-hand simulation: keep rates, mulligans, net mana per turn, reproducible via `seed` (2026-07-22)
 - `hand_probability` -- Exact hypergeometric probability for card-category counts in opening hands (2026-07-22)

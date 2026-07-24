@@ -1431,6 +1431,80 @@ async def deck_validate(
         raise ToolError(f"deck_validate failed: {exc}") from exc
 
 
+@workflow_mcp.tool(annotations=TOOL_ANNOTATIONS, tags=TAGS_VALIDATE | TAGS_COMMANDER)
+async def deck_audit_bundle(
+    decklist: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Bare card names, one entry per physical card (repeat basic lands), "
+                "commander EXCLUDED — a 99-card Commander library"
+            )
+        ),
+    ],
+    commander: Annotated[str, Field(description="Commander card name (bare, exact)")],
+    commander_colors: Annotated[
+        str,
+        Field(
+            description=(
+                "Commander color identity (e.g. 'mardu', 'WBR') — REQUIRED so the "
+                "simulation color screen can never be skipped by omission"
+            )
+        ),
+    ],
+    ctx: Context,
+    iterations: Annotated[int, Field(description="Simulation iterations (100-100000)")] = 10000,
+    seed: Annotated[
+        int | None, Field(description="RNG seed for reproducible simulation (omit for random)")
+    ] = None,
+    extra_mana_sources: Annotated[
+        list[str] | None,
+        Field(description="Card names to force-classify as mana rocks in the simulation"),
+    ] = None,
+    exclude_cards: Annotated[
+        list[str] | None,
+        Field(description="Card names to force-classify as non-mana in the simulation"),
+    ] = None,
+) -> ToolResult:
+    """Full mechanical audit battery in ONE call — validation, analysis, combos, bracket, v3 simulation.
+
+    Runs the five sections concurrently and returns one report where every
+    section carries an explicit ok/error status and echoes the parameters it
+    used. A failed section NEVER fails the whole bundle: it is reported as
+    ``ok: false`` with its error, next to the sections that succeeded.
+    Simulation is forced to v3 (``commander_colors`` + ``tutor_aware=True``).
+    """
+    from mtg_mcp_server.workflows.audit_bundle import deck_audit_bundle as impl
+
+    if not decklist:
+        raise ToolError("Provide at least one card in the decklist.")
+    if not commander.strip():
+        raise ToolError("Provide the commander card name.")
+    if not commander_colors.strip():
+        raise ToolError("Provide commander_colors (e.g. 'mardu' or 'WBR').")
+
+    try:
+        result = await impl(
+            decklist,
+            commander,
+            commander_colors,
+            iterations=iterations,
+            seed=seed,
+            extra_mana_sources=extra_mana_sources,
+            exclude_cards=exclude_cards,
+            bulk=_bulk,
+            scryfall=_require_scryfall(),
+            spellbook=_require_spellbook(),
+            edhrec=_edhrec,
+            on_progress=lambda step, total: _progress(ctx, step, total),
+        )
+        return ToolResult(content=result.markdown, structured_content=result.data)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+    except ServiceError as exc:
+        raise ToolError(f"deck_audit_bundle failed: {exc}") from exc
+
+
 @workflow_mcp.tool(annotations=TOOL_ANNOTATIONS, tags=TAGS_BUILD)
 async def suggest_mana_base(
     decklist: Annotated[list[str], Field(description="Non-land card names in the deck")],
