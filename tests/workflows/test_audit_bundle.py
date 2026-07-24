@@ -8,7 +8,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mtg_mcp_server.services.spellbook import SpellbookError
-from mtg_mcp_server.types import BracketEstimate, DecklistCombos
+from mtg_mcp_server.types import (
+    BracketEstimate,
+    Combo,
+    ComboCard,
+    ComboResult,
+    DecklistCombos,
+)
 from mtg_mcp_server.workflows import WorkflowResult
 from mtg_mcp_server.workflows.audit_bundle import deck_audit_bundle
 
@@ -101,6 +107,65 @@ class TestHappyPath:
         assert sim["params_used"]["commander_colors"] == "mardu"
         assert sim["params_used"]["tutor_aware"] is True
         assert sim["params_used"]["seed"] == 42
+
+
+class TestSlimReport:
+    async def test_combos_are_slimmed_not_dumped(self, patched_impls: dict[str, AsyncMock]) -> None:
+        """Full Combo dumps (description, prices, legalities) tripped the 100KB
+        response limit on a real 99-card deck (2026-07-24): the report must keep
+        names only and point to spellbook_combo_details for the steps."""
+        fat_combo = Combo(
+            id="1-2-3",
+            cards=[ComboCard(name="Ashnod's Altar"), ComboCard(name="Nim Deathmantle")],
+            produces=[ComboResult(feature_name="Infinite colorless mana")],
+            identity="C",
+            description="Step 1: very long step-by-step text. " * 50,
+            prices={"tcgplayer": "12.34"},
+            legalities={"commander": True},
+        )
+        spellbook = _make_spellbook()
+        spellbook.find_decklist_combos = AsyncMock(
+            return_value=DecklistCombos(identity="WBR", included=[fat_combo], almost_included=[])
+        )
+        result = await deck_audit_bundle(
+            DECKLIST,
+            COMMANDER,
+            "mardu",
+            bulk=AsyncMock(),
+            scryfall=AsyncMock(),
+            spellbook=spellbook,
+        )
+        combos = _sections_by_name(result.data)["combos"]["data"]
+        entry = combos["included"][0]
+        assert entry["cards"] == ["Ashnod's Altar", "Nim Deathmantle"]
+        assert entry["results"] == ["Infinite colorless mana"]
+        assert "description" not in entry
+        assert "prices" not in entry
+        assert "legalities" not in entry
+
+    async def test_bracket_keeps_gate_fields_only(
+        self, patched_impls: dict[str, AsyncMock]
+    ) -> None:
+        result = await deck_audit_bundle(
+            DECKLIST,
+            COMMANDER,
+            "mardu",
+            bulk=AsyncMock(),
+            scryfall=AsyncMock(),
+            spellbook=_make_spellbook(),
+        )
+        bracket = _sections_by_name(result.data)["bracket"]["data"]
+        assert bracket["bracket_tag"] == "R"
+        assert set(bracket) == {
+            "bracket_tag",
+            "bracket_tag_name",
+            "banned_cards",
+            "game_changer_cards",
+            "mass_land_denial_cards",
+            "extra_turn_cards",
+            "two_card_combos",
+            "lock_combos",
+        }
 
 
 class TestFailureIsolation:

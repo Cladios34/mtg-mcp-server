@@ -115,13 +115,44 @@ async def deck_audit_bundle(
         )
         return result.data
 
+    def _slim_combo(combo: Any) -> dict[str, Any]:
+        # Full model_dump carries step-by-step description, prerequisites, legalities
+        # and prices PER combo — >100KB total on a real 99-card deck, tripping the
+        # ResponseLimitingMiddleware (seen live 2026-07-24 on the Duplicata deck).
+        # Step-by-step details stay one call away: spellbook_combo_details(id).
+        return {
+            "id": combo.id,
+            "cards": [c.name for c in combo.cards],
+            "results": [r.feature_name for r in combo.produces],
+            "identity": combo.identity,
+            "mana_needed": combo.mana_needed,
+            "bracket_tag": combo.bracket_tag,
+            "popularity": combo.popularity,
+        }
+
     async def _run_combos() -> Any:
         combos = await spellbook.find_decklist_combos([commander], decklist)
-        return combos.model_dump()
+        return {
+            "identity": combos.identity,
+            "included": [_slim_combo(c) for c in combos.included],
+            "almost_included": [_slim_combo(c) for c in combos.almost_included],
+            "note": "step-by-step d'un combo : spellbook_combo_details(id)",
+        }
 
     async def _run_bracket() -> Any:
         estimate = await spellbook.estimate_bracket([commander], decklist)
-        return estimate.model_dump()
+        # Keep the fields the bracket gate actually reads (deck-lab step-06);
+        # drop the raw per-card/per-combo classified payloads (size).
+        return {
+            "bracket_tag": estimate.bracket_tag,
+            "bracket_tag_name": estimate.bracket_tag_name,
+            "banned_cards": estimate.banned_cards,
+            "game_changer_cards": estimate.game_changer_cards,
+            "mass_land_denial_cards": estimate.mass_land_denial_cards,
+            "extra_turn_cards": estimate.extra_turn_cards,
+            "two_card_combos": estimate.two_card_combos,
+            "lock_combos": estimate.lock_combos,
+        }
 
     async def _run_simulation() -> Any:
         result = await simulate_opening_hands(
