@@ -57,7 +57,7 @@ def _mock_client() -> AsyncMock:
     mock = AsyncMock()
     mock.__aenter__ = AsyncMock(return_value=mock)
     mock.__aexit__ = AsyncMock(return_value=False)
-    mock.start_background_refresh = lambda: None
+    mock.start_background_refresh = lambda **_kwargs: None
     mock.get_card = AsyncMock(return_value=None)
     mock.search_cards = AsyncMock(return_value=[])
     mock.search_by_type = AsyncMock(return_value=[])
