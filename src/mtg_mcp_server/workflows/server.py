@@ -77,7 +77,10 @@ async def workflow_lifespan(server: FastMCP):
     settings = Settings()
     async with AsyncExitStack() as stack:
         _scryfall = await stack.enter_async_context(
-            ScryfallClient(base_url=settings.scryfall_base_url)
+            ScryfallClient(
+                base_url=settings.scryfall_base_url,
+                rate_limit_rps=1000 / settings.scryfall_rate_limit_ms,
+            )
         )
         _spellbook = await stack.enter_async_context(
             SpellbookClient(base_url=settings.spellbook_base_url)

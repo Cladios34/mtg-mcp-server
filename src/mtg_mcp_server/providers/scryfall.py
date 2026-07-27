@@ -40,7 +40,10 @@ async def scryfall_lifespan(server: FastMCP):
     """
     global _client
     settings = Settings()
-    client = ScryfallClient(base_url=settings.scryfall_base_url)
+    client = ScryfallClient(
+        base_url=settings.scryfall_base_url,
+        rate_limit_rps=1000 / settings.scryfall_rate_limit_ms,
+    )
     async with client:
         _client = client
         yield {}

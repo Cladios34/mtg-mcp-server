@@ -11,6 +11,8 @@ import httpx
 import pytest
 import respx
 
+from mtg_mcp_server.services.seventeen_lands import _CARD_DATA_TIME_PERIOD
+
 if TYPE_CHECKING:
     from fastmcp import Client
 
@@ -131,8 +133,12 @@ class TestSeventeenLandsMounted:
         """Calling draft_card_ratings through the orchestrator returns rating data."""
         fixture = _load_seventeen_lands_fixture("card_ratings_lci.json")
         respx.get(
-            f"{SEVENTEEN_LANDS_BASE}/card_ratings/data",
-            params={"expansion": "LCI", "event_type": "PremierDraft"},
+            f"{SEVENTEEN_LANDS_BASE}/api/card_data",
+            params={
+                "expansion": "LCI",
+                "event_type": "PremierDraft",
+                "time_period": _CARD_DATA_TIME_PERIOD,
+            },
         ).mock(return_value=httpx.Response(200, json=fixture))
 
         result = await mcp_client.call_tool("draft_card_ratings", {"set_code": "LCI"})

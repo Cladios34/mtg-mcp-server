@@ -36,7 +36,10 @@ class Settings(BaseSettings):
     # Each service client reads its base URL from here so tests can point
     # at a local mock server via env var override.
     scryfall_base_url: str = "https://api.scryfall.com"
-    scryfall_rate_limit_ms: int = 100
+    # 120ms = 8.3 req/s. Scryfall requires "less than 10 requests per second";
+    # the previous 100ms sat exactly on the ceiling and drew HTTP 429s carrying
+    # a 60s cooldown and a network-block warning (incident 2026-07-27).
+    scryfall_rate_limit_ms: int = 120
     spellbook_base_url: str = "https://backend.commanderspellbook.com"
     seventeen_lands_base_url: str = "https://www.17lands.com"
     edhrec_base_url: str = "https://json.edhrec.com"

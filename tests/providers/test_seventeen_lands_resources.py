@@ -11,6 +11,7 @@ import respx
 from fastmcp import Client
 
 from mtg_mcp_server.providers.seventeen_lands import draft_mcp
+from mtg_mcp_server.services.seventeen_lands import _CARD_DATA_TIME_PERIOD
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "seventeen_lands"
 BASE_URL = "https://www.17lands.com"
@@ -36,8 +37,12 @@ class TestDraftRatingsResource:
         """Draft ratings resource returns JSON list with card names and win rates."""
         fixture = _load_fixture("card_ratings_lci.json")
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
-            params={"expansion": "LCI", "event_type": "PremierDraft"},
+            f"{BASE_URL}/api/card_data",
+            params={
+                "expansion": "LCI",
+                "event_type": "PremierDraft",
+                "time_period": _CARD_DATA_TIME_PERIOD,
+            },
         ).mock(return_value=httpx.Response(200, json=fixture))
 
         result = await client.read_resource("mtg://draft/LCI/ratings")
@@ -51,8 +56,12 @@ class TestDraftRatingsResource:
     async def test_server_error_returns_error_json(self, client: Client):
         """Draft ratings resource returns error JSON on 17Lands server failure."""
         respx.get(
-            f"{BASE_URL}/card_ratings/data",
-            params={"expansion": "FAKE", "event_type": "PremierDraft"},
+            f"{BASE_URL}/api/card_data",
+            params={
+                "expansion": "FAKE",
+                "event_type": "PremierDraft",
+                "time_period": _CARD_DATA_TIME_PERIOD,
+            },
         ).mock(return_value=httpx.Response(500, text="Internal Server Error"))
 
         result = await client.read_resource("mtg://draft/FAKE/ratings")

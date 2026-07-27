@@ -19,7 +19,10 @@ import mtg_mcp_server.services.cache as cache_mod
 from mtg_mcp_server.services.cache import _decklist_key, _method_key, async_cached
 from mtg_mcp_server.services.edhrec import EDHRECClient
 from mtg_mcp_server.services.scryfall import ScryfallClient
-from mtg_mcp_server.services.seventeen_lands import SeventeenLandsClient
+from mtg_mcp_server.services.seventeen_lands import (
+    _CARD_DATA_TIME_PERIOD,
+    SeventeenLandsClient,
+)
 from mtg_mcp_server.services.spellbook import SpellbookClient
 
 SCRYFALL_FIXTURES = Path(__file__).parent.parent / "fixtures" / "scryfall"
@@ -441,8 +444,12 @@ class TestSeventeenLandsCaching:
         """Second card ratings call returns cached result without a second HTTP call."""
         fixture = _load_json(SEVENTEEN_LANDS_FIXTURES / "card_ratings_lci.json")
         route = respx.get(
-            f"{SEVENTEEN_LANDS_URL}/card_ratings/data",
-            params={"expansion": "LCI", "event_type": "PremierDraft"},
+            f"{SEVENTEEN_LANDS_URL}/api/card_data",
+            params={
+                "expansion": "LCI",
+                "event_type": "PremierDraft",
+                "time_period": _CARD_DATA_TIME_PERIOD,
+            },
         ).mock(return_value=httpx.Response(200, json=fixture))
 
         async with SeventeenLandsClient(base_url=SEVENTEEN_LANDS_URL) as client:
@@ -456,12 +463,20 @@ class TestSeventeenLandsCaching:
         """Different set codes produce separate cache entries."""
         fixture = _load_json(SEVENTEEN_LANDS_FIXTURES / "card_ratings_lci.json")
         route_lci = respx.get(
-            f"{SEVENTEEN_LANDS_URL}/card_ratings/data",
-            params={"expansion": "LCI", "event_type": "PremierDraft"},
+            f"{SEVENTEEN_LANDS_URL}/api/card_data",
+            params={
+                "expansion": "LCI",
+                "event_type": "PremierDraft",
+                "time_period": _CARD_DATA_TIME_PERIOD,
+            },
         ).mock(return_value=httpx.Response(200, json=fixture))
         route_mkm = respx.get(
-            f"{SEVENTEEN_LANDS_URL}/card_ratings/data",
-            params={"expansion": "MKM", "event_type": "PremierDraft"},
+            f"{SEVENTEEN_LANDS_URL}/api/card_data",
+            params={
+                "expansion": "MKM",
+                "event_type": "PremierDraft",
+                "time_period": _CARD_DATA_TIME_PERIOD,
+            },
         ).mock(return_value=httpx.Response(200, json=fixture))
 
         async with SeventeenLandsClient(base_url=SEVENTEEN_LANDS_URL) as client:
