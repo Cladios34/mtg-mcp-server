@@ -206,3 +206,67 @@ class TestScryfallServerErrors:
         async with ScryfallClient(base_url=BASE_URL) as client:
             with pytest.raises(ScryfallError):
                 await client.get_card_by_name("Sol Ring")
+
+
+class TestGetCardsCollection:
+    """Batch card lookup via POST /cards/collection (75 identifiers per request)."""
+
+    @respx.mock
+    async def test_single_batch_returns_found_and_missing(self):
+        """One request; unknown names come back through Scryfall's not_found list."""
+        card = _load_fixture("card_muldrotha.json")
+        route = respx.post(f"{BASE_URL}/cards/collection").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [card],
+                    "not_found": [{"name": "Zzzz Not A Card"}],
+                },
+            )
+        )
+        async with ScryfallClient(base_url=BASE_URL) as client:
+            found, missing = await client.get_cards_collection(
+                ["Muldrotha, the Gravetide", "Zzzz Not A Card"]
+            )
+
+        assert route.call_count == 1
+        assert [c.name for c in found] == ["Muldrotha, the Gravetide"]
+        assert missing == ["Zzzz Not A Card"]
+        assert json.loads(route.calls[0].request.content) == {
+            "identifiers": [{"name": "Muldrotha, the Gravetide"}, {"name": "Zzzz Not A Card"}]
+        }
+
+    @respx.mock
+    async def test_chunks_at_scryfall_75_identifier_ceiling(self):
+        """160 names split into 3 requests of at most 75 identifiers each."""
+        route = respx.post(f"{BASE_URL}/cards/collection").mock(
+            return_value=httpx.Response(200, json={"object": "list", "data": [], "not_found": []})
+        )
+        async with ScryfallClient(base_url=BASE_URL) as client:
+            await client.get_cards_collection([f"Card {i}" for i in range(160)])
+
+        assert route.call_count == 3
+        sizes = [len(json.loads(c.request.content)["identifiers"]) for c in route.calls]
+        assert sizes == [75, 75, 10]
+
+    @respx.mock
+    async def test_empty_input_makes_no_request(self):
+        """An empty name list short-circuits without touching the network."""
+        route = respx.post(f"{BASE_URL}/cards/collection")
+        async with ScryfallClient(base_url=BASE_URL) as client:
+            found, missing = await client.get_cards_collection([])
+
+        assert route.call_count == 0
+        assert found == []
+        assert missing == []
+
+    @respx.mock
+    async def test_api_error_raises_scryfall_error(self):
+        """A non-200 from the batch endpoint surfaces as ScryfallError."""
+        respx.post(f"{BASE_URL}/cards/collection").mock(
+            return_value=httpx.Response(422, json={"object": "error", "details": "bad body"})
+        )
+        async with ScryfallClient(base_url=BASE_URL) as client:
+            with pytest.raises(ScryfallError):
+                await client.get_cards_collection(["Sol Ring"])

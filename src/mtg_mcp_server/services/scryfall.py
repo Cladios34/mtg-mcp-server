@@ -12,6 +12,9 @@ from mtg_mcp_server.services.base import DEFAULT_USER_AGENT, BaseClient, Service
 from mtg_mcp_server.services.cache import _method_key, async_cached
 from mtg_mcp_server.types import Card, CardSearchResult, Ruling, SetInfo
 
+# Scryfall's documented ceiling for POST /cards/collection identifiers.
+_COLLECTION_CHUNK = 75
+
 
 class ScryfallError(ServiceError):
     """Scryfall API error."""
@@ -25,7 +28,11 @@ class ScryfallClient(BaseClient):
     """Async client for the Scryfall REST API.
 
     Requires ``User-Agent`` and ``Accept`` headers on every request (set by
-    BaseClient). Rate limited to ~10 req/sec per Scryfall's guidelines.
+    BaseClient). Rate limited just under Scryfall's 10 req/sec ceiling.
+
+    To look up many cards, use :meth:`get_cards_collection` rather than looping
+    over :meth:`get_card_by_name`: the base client serializes requests, so a
+    deck's worth of individual lookups is both slow and rate-limit bait.
 
     Args:
         base_url: Scryfall API base URL.
@@ -44,7 +51,10 @@ class ScryfallClient(BaseClient):
     def __init__(
         self,
         base_url: str = "https://api.scryfall.com",
-        rate_limit_rps: float = 10.0,
+        # 8.3 req/s. Scryfall requires "less than 10 requests per second"; sitting
+        # exactly on 10.0 drew HTTP 429s carrying a 60s cooldown and a
+        # network-block warning (incident 2026-07-27).
+        rate_limit_rps: float = 8.3,
         user_agent: str = DEFAULT_USER_AGENT,
     ) -> None:
         super().__init__(
@@ -76,6 +86,44 @@ class ScryfallClient(BaseClient):
                 raise CardNotFoundError(f"Card not found: '{name}'", status_code=404) from exc
             raise ScryfallError(exc.message, status_code=exc.status_code) from exc
         return Card.model_validate(response.json())
+
+    async def get_cards_collection(self, names: list[str]) -> tuple[list[Card], list[str]]:
+        """Look up many cards by name in as few requests as possible.
+
+        Scryfall accepts up to ``_COLLECTION_CHUNK`` identifiers per request, so
+        a 99-card deck costs 2 requests instead of 99. Use this instead of looping
+        over :meth:`get_card_by_name`: serialized per-card lookups trip Scryfall's
+        "less than 10 requests per second" limit, which answers HTTP 429 with a
+        60-second cooldown and a network-block warning.
+
+        Args:
+            names: Card names to resolve. Order is preserved in the results.
+
+        Returns:
+            A ``(found, missing)`` tuple: parsed Cards, and the names Scryfall
+            reported under ``not_found``.
+
+        Raises:
+            ScryfallError: On API errors.
+        """
+        found: list[Card] = []
+        missing: list[str] = []
+        for start in range(0, len(names), _COLLECTION_CHUNK):
+            chunk = names[start : start + _COLLECTION_CHUNK]
+            try:
+                response = await self._post(
+                    "/cards/collection",
+                    json={"identifiers": [{"name": name} for name in chunk]},
+                )
+            except ServiceError as exc:
+                raise ScryfallError(exc.message, status_code=exc.status_code) from exc
+            payload = response.json()
+            found.extend(Card.model_validate(c) for c in payload.get("data", []))
+            # not_found echoes the identifiers we sent, so read back the "name" key.
+            missing.extend(
+                item["name"] for item in payload.get("not_found", []) if item.get("name")
+            )
+        return found, missing
 
     @async_cached(_search_cache, key=_method_key)
     async def search_cards(self, query: str, page: int = 1) -> CardSearchResult:

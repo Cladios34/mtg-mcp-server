@@ -12,7 +12,6 @@ lands-only rule is available as ``keep_rule="lands_v1"``. The workflow server
 
 from __future__ import annotations
 
-import asyncio
 import enum
 import math
 import random
@@ -414,35 +413,11 @@ async def _resolve_deck(
         maps lowercase card name to the resolved ``Card``, and ``unresolved``
         lists the original names that could not be resolved.
     """
-    from mtg_mcp_server.workflows.card_resolver import resolve_card
+    from mtg_mcp_server.workflows.card_resolver import resolve_cards
 
     slots = parse_decklist(decklist)
     unique_names = list(dict.fromkeys(name for _, name in slots))
-
-    # Cap concurrent Scryfall lookups to avoid overwhelming the connection pool.
-    sem = asyncio.Semaphore(10)
-
-    async def _bounded_resolve(name: str) -> Card:
-        async with sem:
-            return await resolve_card(name, bulk=bulk, scryfall=scryfall)
-
-    tasks = [_bounded_resolve(name) for name in unique_names]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    cards_by_name: dict[str, Card] = {}
-    unresolved: list[str] = []
-    for name, result in zip(unique_names, results, strict=True):
-        if isinstance(result, BaseException):
-            log.warning(
-                "simulate_opening_hands.resolve_failed",
-                card=name,
-                error=str(result),
-                error_type=type(result).__name__,
-            )
-            unresolved.append(name)
-        else:
-            cards_by_name[name.lower()] = result
-
+    cards_by_name, unresolved = await resolve_cards(unique_names, bulk=bulk, scryfall=scryfall)
     return slots, cards_by_name, unresolved
 
 

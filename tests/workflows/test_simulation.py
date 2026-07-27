@@ -140,6 +140,22 @@ def _make_scryfall(cards: dict[str, Card]) -> AsyncMock:
     return mock
 
 
+def _make_collection_scryfall(cards: dict[str, Card]) -> AsyncMock:
+    """Mock ScryfallClient exposing the batch endpoint, chunked at 75 names."""
+
+    async def get_cards_collection(names: list[str]) -> tuple[list[Card], list[str]]:
+        found = [cards[n.lower()] for n in names if n.lower() in cards]
+        missing = [n for n in names if n.lower() not in cards]
+        return found, missing
+
+    mock = AsyncMock()
+    mock.get_cards_collection = AsyncMock(side_effect=get_cards_collection)
+    mock.get_card_by_name = AsyncMock(
+        side_effect=CardNotFoundError("unexpected per-card lookup", status_code=404)
+    )
+    return mock
+
+
 def _bear_cards(count: int) -> dict[str, Card]:
     return {f"bear {i}".lower(): _make_card(f"Bear {i}") for i in range(count)}
 
@@ -1113,3 +1129,58 @@ class TestSimulateOpeningHandsV3:
                 bulk=bulk,
                 scryfall=_make_scryfall(cards),
             )
+
+
+# ---------------------------------------------------------------------------
+# Batch card resolution (Scryfall rate-limit protection)
+# ---------------------------------------------------------------------------
+
+
+class TestBatchResolution:
+    """Cards missing from bulk data resolve in batches, never one request per card.
+
+    Regression guard for the 2026-07-27 incident: resolving a 99-card deck whose
+    names miss bulk data fired 99 serialized Scryfall lookups, tripped Scryfall's
+    "less than 10 requests per second" limit (HTTP 429 with a 60s cooldown and a
+    network-block warning), and pushed tool latency to 217s -- past any web
+    connector's timeout.
+    """
+
+    async def test_bulk_misses_resolve_in_a_single_batch_call(self):
+        """80 bulk misses cost 1 batch call, not 80 named lookups.
+
+        Chunking to Scryfall's 75-identifier ceiling is the client's job
+        (see TestGetCardsCollection); the workflow issues one batch request.
+        """
+        cards = _bear_cards(80)
+        bulk = _make_bulk({})  # every name misses bulk data
+        scryfall = _make_collection_scryfall(cards)
+
+        await simulate_opening_hands(
+            [f"Bear {i}" for i in range(80)],
+            iterations=100,
+            seed=1,
+            bulk=bulk,
+            scryfall=scryfall,
+        )
+
+        assert scryfall.get_cards_collection.await_count == 1
+        assert scryfall.get_card_by_name.await_count == 0
+
+    async def test_unresolvable_names_reported_without_extra_requests(self):
+        """Unknown names land in `unresolved` and cost no per-card follow-up."""
+        cards = _bear_cards(10)
+        cards["forest"] = FOREST
+        scryfall = _make_collection_scryfall(cards)
+
+        result = await simulate_opening_hands(
+            ["30x Forest", *(f"Bear {i}" for i in range(10)), "Zzzz Not A Card"],
+            iterations=100,
+            seed=1,
+            bulk=_make_bulk({}),
+            scryfall=scryfall,
+        )
+
+        assert result.data["unresolved"] == ["Zzzz Not A Card"]
+        assert scryfall.get_cards_collection.await_count == 1
+        assert scryfall.get_card_by_name.await_count == 0

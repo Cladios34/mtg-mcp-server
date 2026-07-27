@@ -246,40 +246,27 @@ async def _resolve_cards(
     scryfall: ScryfallClient,
 ) -> tuple[list[_ResolvedCard], list[str]]:
     """Resolve all cards in the decklist using bulk-data-first fallback."""
-    from mtg_mcp_server.workflows.card_resolver import resolve_card
+    from mtg_mcp_server.workflows.card_resolver import resolve_cards
 
-    # Cap concurrent Scryfall lookups to avoid overwhelming the connection pool.
-    sem = asyncio.Semaphore(10)
-
-    async def _bounded_resolve(name: str) -> Card:
-        """Resolve a single card with concurrency limiting."""
-        async with sem:
-            return await resolve_card(name, bulk=bulk, scryfall=scryfall)
-
-    tasks = [_bounded_resolve(name) for name in decklist]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    cards_by_name, unresolved = await resolve_cards(decklist, bulk=bulk, scryfall=scryfall)
+    missing = {name.lower() for name in unresolved}
 
     resolved: list[_ResolvedCard] = []
     failures: list[str] = []
 
-    for name, result in zip(decklist, results, strict=True):
-        if isinstance(result, BaseException):
-            log.warning(
-                "deck_analysis.resolve_failed",
-                card=name,
-                error=str(result),
-                error_type=type(result).__name__,
-            )
+    for name in decklist:
+        card = cards_by_name.get(name.lower())
+        if card is None or name.lower() in missing:
             failures.append(name)
             # Add with defaults so curve still counts it
             resolved.append(_ResolvedCard(name=name))
         else:
             resolved.append(
                 _ResolvedCard(
-                    name=result.name,
-                    mana_cost=_get_mana_cost(result),
-                    cmc=_get_cmc(result),
-                    price_usd=_get_price_usd(result),
+                    name=card.name,
+                    mana_cost=_get_mana_cost(card),
+                    cmc=_get_cmc(card),
+                    price_usd=_get_price_usd(card),
                 )
             )
 
