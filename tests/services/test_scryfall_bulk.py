@@ -597,6 +597,41 @@ class TestSearchByText:
 class TestBackgroundRefresh:
     """Test background refresh task lifecycle."""
 
+    async def test_start_preloads_immediately(self):
+        """The refresh task loads on start, it does not wait a full interval first.
+
+        Regression guard: the loop used to sleep `refresh_hours` BEFORE its first
+        load, so nothing was ever preloaded and the first user request paid the
+        ~30MB download. Measured 2026-07-27: it put 6.5s on deck_audit_bundle's
+        first call, with three sections queued behind the same download.
+        """
+        with respx.mock:
+            _mock_metadata_route(respx)
+            _mock_download_route(respx)
+            client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=24)
+            async with client:
+                client.start_background_refresh()
+                # Yield to the loop until it has loaded, without waiting an interval.
+                for _ in range(100):
+                    if client._loaded_at > 0:
+                        break
+                    await asyncio.sleep(0.01)
+                assert client._loaded_at > 0, "background task did not preload on start"
+                assert len(client._unique_cards) > 0
+
+    async def test_preload_false_does_not_load_on_start(self):
+        """preload=False waits a full interval, so tests never hit the live API."""
+        with respx.mock:
+            meta = _mock_metadata_route(respx)
+            _mock_download_route(respx)
+            client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=24)
+            async with client:
+                client.start_background_refresh(preload=False)
+                for _ in range(20):
+                    await asyncio.sleep(0.01)
+                assert client._loaded_at == 0.0
+                assert meta.call_count == 0
+
     async def test_start_creates_task(self):
         """start_background_refresh() creates a background task."""
         client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=24)

@@ -96,7 +96,7 @@ async def workflow_lifespan(server: FastMCP):
                 refresh_hours=settings.bulk_data_refresh_hours,
             )
             _bulk = await stack.enter_async_context(client)
-            _bulk.start_background_refresh()
+            _bulk.start_background_refresh(preload=settings.bulk_data_preload)
         if settings.enable_rules:
             _rules = RulesService(
                 rules_url=settings.rules_url,

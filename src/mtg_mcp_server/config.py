@@ -62,6 +62,10 @@ class Settings(BaseSettings):
 
     # --- Scryfall Bulk Data ---
     bulk_data_refresh_hours: int = 12
+    # Download the bulk file at startup instead of on the first request that
+    # needs it (which paid ~6.5s). Tests set this false: they must not hit the
+    # live API, and the refresh task would download ~30MB per server fixture.
+    bulk_data_preload: bool = True
 
     # --- Comprehensive Rules ---
     rules_url: str = "https://media.wizards.com/2025/downloads/MagicCompRules%2020250404.txt"

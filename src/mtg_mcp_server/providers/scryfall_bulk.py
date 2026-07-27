@@ -80,7 +80,7 @@ async def scryfall_bulk_lifespan(server: FastMCP):
     )
     async with client:
         _client = client
-        client.start_background_refresh()
+        client.start_background_refresh(preload=settings.bulk_data_preload)
         yield {}
     _client = None
 

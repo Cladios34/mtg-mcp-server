@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+# Server lifespans build real clients, so the bulk-data preload would download
+# ~30MB from the live API per server fixture. Set before any Settings() call.
+os.environ.setdefault("MTG_MCP_BULK_DATA_PRELOAD", "false")
 from fastmcp import Client
 
 from mtg_mcp_server.server import mcp

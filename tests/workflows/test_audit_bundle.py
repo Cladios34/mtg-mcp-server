@@ -220,3 +220,142 @@ class TestFailureIsolation:
             assert "ok" in section
             assert section["ok"] or "error" in section
             assert "params_used" in section
+
+
+class TestReportedDeckSize:
+    """`deck_size` counts physical cards, matching what the sections report."""
+
+    async def test_quantity_entries_count_as_cards(self, patched_impls):
+        """An entry of "30 Plains" is 30 cards, not 1 entry.
+
+        Regression guard: deck_size used len(decklist), so a quantity-style list
+        reported 3 while every section counted 35 (observed 2026-07-27).
+        """
+        result = await deck_audit_bundle(
+            ["1 Sol Ring", "4 Lightning Bolt", "30 Plains"],
+            COMMANDER,
+            "mardu",
+            iterations=100,
+            bulk=AsyncMock(),
+            scryfall=AsyncMock(),
+            spellbook=_make_spellbook(),
+        )
+        assert result.data["deck_size"] == 35
+
+    async def test_plain_entries_still_count_one_each(self, patched_impls):
+        """A bare one-name-per-card list is unaffected."""
+        result = await deck_audit_bundle(
+            DECKLIST,
+            COMMANDER,
+            "mardu",
+            iterations=100,
+            bulk=AsyncMock(),
+            scryfall=AsyncMock(),
+            spellbook=_make_spellbook(),
+        )
+        assert result.data["deck_size"] == len(DECKLIST)
+
+
+class TestCommanderVerification:
+    """An unknown commander is called out instead of silently audited."""
+
+    @staticmethod
+    def _resolver(monkeypatch, *, unresolved: list[str]):
+        async def fake(names, *, bulk, scryfall):
+            return {}, unresolved
+
+        monkeypatch.setattr("mtg_mcp_server.workflows.card_resolver.resolve_cards", fake)
+
+    async def test_unknown_commander_is_flagged(self, patched_impls, monkeypatch):
+        """A commander no source can resolve is reported, loudly.
+
+        Regression guard: the bundle happily returned a full report for
+        "Zzzz Not A Card" (observed 2026-07-27), so a typo produced an audit
+        that looked authoritative while its commander-keyed data was empty.
+        """
+        self._resolver(monkeypatch, unresolved=["Zzzz Not A Card"])
+        result = await deck_audit_bundle(
+            DECKLIST,
+            "Zzzz Not A Card",
+            "mardu",
+            iterations=100,
+            bulk=AsyncMock(),
+            scryfall=AsyncMock(),
+            spellbook=_make_spellbook(),
+        )
+        assert result.data["commander_resolved"] is False
+        assert "Zzzz Not A Card" in result.markdown
+        assert "not found" in result.markdown.lower()
+
+    async def test_known_commander_reports_resolved(self, patched_impls, monkeypatch):
+        """A real commander sets the flag and adds no warning."""
+        self._resolver(monkeypatch, unresolved=[])
+        result = await deck_audit_bundle(
+            DECKLIST,
+            COMMANDER,
+            "mardu",
+            iterations=100,
+            bulk=AsyncMock(),
+            scryfall=AsyncMock(),
+            spellbook=_make_spellbook(),
+        )
+        assert result.data["commander_resolved"] is True
+        assert "not found" not in result.markdown.lower()
+
+    async def test_resolver_failure_does_not_fail_the_bundle(self, patched_impls, monkeypatch):
+        """If the lookup itself dies, the audit still runs and says nothing false."""
+
+        async def boom(names, *, bulk, scryfall):
+            raise RuntimeError("scryfall down")
+
+        monkeypatch.setattr("mtg_mcp_server.workflows.card_resolver.resolve_cards", boom)
+        result = await deck_audit_bundle(
+            DECKLIST,
+            COMMANDER,
+            "mardu",
+            iterations=100,
+            bulk=AsyncMock(),
+            scryfall=AsyncMock(),
+            spellbook=_make_spellbook(),
+        )
+        assert result.data["commander_resolved"] is None
+        assert result.data["failed_sections"] == []
+
+
+class TestSpellbookCallDeduplication:
+    """Each Spellbook payload is fetched once and shared across sections."""
+
+    async def test_each_endpoint_called_once(self, patched_impls):
+        """combos, bracket and analysis share two calls, not four.
+
+        The Spellbook client is capped at 3 req/s behind a single-slot
+        semaphore, so duplicate calls serialize. Measured 2026-07-27: the
+        redundant pair pushed the analysis section to 8.7s waiting its turn.
+        """
+        spellbook = _make_spellbook()
+        await deck_audit_bundle(
+            DECKLIST,
+            COMMANDER,
+            "mardu",
+            iterations=100,
+            bulk=AsyncMock(),
+            scryfall=AsyncMock(),
+            spellbook=spellbook,
+        )
+        assert spellbook.estimate_bracket.await_count == 1
+        assert spellbook.find_decklist_combos.await_count == 1
+
+    async def test_analysis_receives_the_shared_fetches(self, patched_impls):
+        """deck_analysis is handed the in-flight awaitables instead of re-fetching."""
+        await deck_audit_bundle(
+            DECKLIST,
+            COMMANDER,
+            "mardu",
+            iterations=100,
+            bulk=AsyncMock(),
+            scryfall=AsyncMock(),
+            spellbook=_make_spellbook(),
+        )
+        kwargs = patched_impls["analysis"].await_args.kwargs
+        assert kwargs["bracket_coro"] is not None
+        assert kwargs["combo_coro"] is not None

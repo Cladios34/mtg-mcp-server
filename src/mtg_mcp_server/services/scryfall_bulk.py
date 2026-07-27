@@ -131,16 +131,22 @@ class ScryfallBulkClient:
         self._unique_cards.clear()
         self._loaded_at = 0.0
 
-    def start_background_refresh(self) -> None:
+    def start_background_refresh(self, *, preload: bool = True) -> None:
         """Start the background refresh loop.
 
         Creates an ``asyncio.Task`` that periodically calls
         :meth:`ensure_loaded` at the refresh interval. The task is
         cancelled in :meth:`__aexit__`.
+
+        Args:
+            preload: Load immediately rather than after one refresh interval.
+                Leaving this off means the first request that needs card data
+                pays the download itself (~6.5s). Tests pass False so the
+                suite never reaches the live API.
         """
         if self._refresh_task is not None:
             return  # Already running
-        self._refresh_task = asyncio.create_task(self._refresh_loop())
+        self._refresh_task = asyncio.create_task(self._refresh_loop(preload=preload))
 
     async def ensure_loaded(self) -> None:
         """Download and parse Oracle Cards if not loaded or stale.
@@ -603,17 +609,27 @@ class ScryfallBulkClient:
         self._cards = cards
         self._unique_cards = unique
 
-    async def _refresh_loop(self) -> None:
+    async def _refresh_loop(self, *, preload: bool = True) -> None:
         """Background loop that periodically calls ensure_loaded().
 
         Runs until cancelled (via __aexit__). Errors are logged but do
         not stop the loop.
+
+        With ``preload``, loads before the first sleep. Sleeping first meant
+        nothing was ever preloaded and the first user request paid the ~30MB
+        download itself (6.5s on deck_audit_bundle's first call, 2026-07-27).
+        ensure_loaded() holds a lock, so a request arriving mid-download waits
+        on it instead of starting a second one.
         """
         while True:
-            await asyncio.sleep(self._refresh_seconds)
+            if not preload:
+                preload = True  # only the first iteration can be skipped
+                await asyncio.sleep(self._refresh_seconds)
+                continue
             try:
                 await self.ensure_loaded()
             except ScryfallBulkError:
                 log.warning("scryfall_bulk.background_refresh_error", exc_info=True)
             except Exception:
                 log.error("scryfall_bulk.background_refresh_unexpected_error", exc_info=True)
+            await asyncio.sleep(self._refresh_seconds)

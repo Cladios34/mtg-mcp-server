@@ -19,9 +19,11 @@ Design requirements:
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
+from mtg_mcp_server.utils.decklist import parse_decklist
 from mtg_mcp_server.workflows import WorkflowResult
 
 if TYPE_CHECKING:
@@ -37,7 +39,12 @@ Section = dict[str, Any]
 
 
 async def _guard(name: str, params: Mapping[str, Any], coro: Awaitable[Any]) -> Section:
-    """Run one section, converting ANY failure into an explicit error entry."""
+    """Run one section, converting ANY failure into an explicit error entry.
+
+    Every section reports ``elapsed_ms`` so a slow backend is attributable from
+    the response alone, without server-side profiling.
+    """
+    start = time.perf_counter()
     try:
         data = await coro
     except Exception as exc:  # every failure must surface in the report, none may escape
@@ -46,8 +53,15 @@ async def _guard(name: str, params: Mapping[str, Any], coro: Awaitable[Any]) -> 
             "ok": False,
             "params_used": dict(params),
             "error": f"{type(exc).__name__}: {exc}",
+            "elapsed_ms": round((time.perf_counter() - start) * 1000),
         }
-    return {"section": name, "ok": True, "params_used": dict(params), "data": data}
+    return {
+        "section": name,
+        "ok": True,
+        "params_used": dict(params),
+        "data": data,
+        "elapsed_ms": round((time.perf_counter() - start) * 1000),
+    }
 
 
 async def _fail(message: str) -> Any:
@@ -102,6 +116,14 @@ async def deck_audit_bundle(
         )
         return result.data
 
+    # The bundle needs each Spellbook payload three times over (combos section,
+    # bracket section, and deck_analysis internally). The Spellbook client is
+    # capped at 3 req/s behind a single-slot semaphore, so duplicate calls
+    # SERIALIZE: measured 2026-07-27, the redundant pair pushed analysis to
+    # 8.7s waiting its turn. Fetch each once and share the awaitable.
+    bracket_task = asyncio.ensure_future(spellbook.estimate_bracket([commander], decklist))
+    combos_task = asyncio.ensure_future(spellbook.find_decklist_combos([commander], decklist))
+
     async def _run_analysis() -> Any:
         result = await deck_analysis(
             decklist,
@@ -112,6 +134,8 @@ async def deck_audit_bundle(
             edhrec=edhrec,
             on_progress=progress,
             response_format="concise",
+            bracket_coro=asyncio.shield(bracket_task),
+            combo_coro=asyncio.shield(combos_task),
         )
         return result.data
 
@@ -131,7 +155,7 @@ async def deck_audit_bundle(
         }
 
     async def _run_combos() -> Any:
-        combos = await spellbook.find_decklist_combos([commander], decklist)
+        combos = await asyncio.shield(combos_task)
         return {
             "identity": combos.identity,
             "included": [_slim_combo(c) for c in combos.included],
@@ -140,7 +164,7 @@ async def deck_audit_bundle(
         }
 
     async def _run_bracket() -> Any:
-        estimate = await spellbook.estimate_bracket([commander], decklist)
+        estimate = await asyncio.shield(bracket_task)
         # Keep the fields the bracket gate actually reads (deck-lab step-06);
         # drop the raw per-card/per-combo classified payloads (size).
         return {
@@ -170,12 +194,29 @@ async def deck_audit_bundle(
         )
         return result.data
 
+    async def _check_commander() -> bool | None:
+        """True/False if the commander name resolves, None if the check itself broke.
+
+        A typo'd commander otherwise yields a confident-looking report whose
+        commander-keyed data (EDHREC synergy, combos) is quietly empty.
+        """
+        from mtg_mcp_server.workflows import card_resolver
+
+        try:
+            _, unresolved = await card_resolver.resolve_cards(
+                [commander], bulk=bulk, scryfall=scryfall
+            )
+        except Exception:  # never let a name check take the audit down
+            return None
+        return not unresolved
+
     if bulk is not None:
         validate_coro = _run_validate(bulk)
     else:
         validate_coro = _fail("bulk data backend disabled (enable_bulk_data)")
 
-    sections = await asyncio.gather(
+    commander_resolved, *sections = await asyncio.gather(
+        _check_commander(),
         _guard("validate", {"format": "commander", "commander": commander}, validate_coro),
         _guard("analysis", {"commander": commander, "response_format": "concise"}, _run_analysis()),
         _guard("combos", {"commanders": [commander]}, _run_combos()),
@@ -201,6 +242,12 @@ async def deck_audit_bundle(
     if failed:
         summary += f" — FAILED: {', '.join(failed)}"
     lines = [f"# Deck audit bundle — {commander}", "", summary]
+    if commander_resolved is False:
+        lines.append(
+            f"- **WARNING**: commander '{commander}' was not found in any card source. "
+            "Check the spelling: commander-keyed data (EDHREC synergy, combos, bracket) "
+            "is meaningless for a name that does not exist."
+        )
     for s in sections:
         status = "OK" if s["ok"] else f"FAILED — {s['error']}"
         lines.append(f"- **{s['section']}**: {status}")
@@ -217,7 +264,10 @@ async def deck_audit_bundle(
 
     data = {
         "commander": commander,
-        "deck_size": len(decklist),
+        "commander_resolved": commander_resolved,
+        # Physical cards, not entries: "30 Plains" is 30 cards. len(decklist)
+        # reported 3 for a quantity-style list while every section counted 35.
+        "deck_size": sum(qty for qty, _ in parse_decklist(decklist)),
         "sections": sections,
         "failed_sections": failed,
     }

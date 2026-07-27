@@ -135,6 +135,8 @@ async def deck_analysis(
     edhrec: EDHRECClient | None,
     on_progress: Callable[[int, int], Awaitable[None]] | None = None,
     response_format: Literal["detailed", "concise"] = "detailed",
+    bracket_coro: Awaitable[BracketEstimate] | None = None,
+    combo_coro: Awaitable[DecklistCombos] | None = None,
 ) -> WorkflowResult:
     """Full decklist health check using all available backends.
 
@@ -146,6 +148,9 @@ async def deck_analysis(
         spellbook: Initialized SpellbookClient.
         edhrec: Initialized EDHRECClient, or None if disabled.
         on_progress: Optional progress callback (step, total).
+        bracket_coro: Optional in-flight bracket estimate to await instead of
+            issuing a second one (see :func:`_fetch_spellbook_data`).
+        combo_coro: Optional in-flight decklist-combos fetch, same rationale.
 
     Returns:
         WorkflowResult with markdown and structured data.
@@ -174,7 +179,12 @@ async def deck_analysis(
         await on_progress(2, 3)
 
     bracket, deck_combos = await _fetch_spellbook_data(
-        commander_name, decklist, spellbook=spellbook, sources=sources
+        commander_name,
+        decklist,
+        spellbook=spellbook,
+        sources=sources,
+        bracket_coro=bracket_coro,
+        combo_coro=combo_coro,
     )
 
     # Step 3/3: Synergy analysis
@@ -279,10 +289,20 @@ async def _fetch_spellbook_data(
     *,
     spellbook: SpellbookClient,
     sources: _DataSources,
+    bracket_coro: Awaitable[BracketEstimate] | None = None,
+    combo_coro: Awaitable[DecklistCombos] | None = None,
 ) -> tuple[BracketEstimate | None, DecklistCombos | None]:
-    """Fetch bracket estimate and decklist combos concurrently."""
-    bracket_coro = spellbook.estimate_bracket([commander_name], decklist)
-    combo_coro = spellbook.find_decklist_combos([commander_name], decklist)
+    """Fetch bracket estimate and decklist combos concurrently.
+
+    A caller already fetching the same two Spellbook payloads can pass its own
+    awaitables so they are fetched once. The Spellbook client is capped at
+    3 req/s behind a single-slot semaphore, so duplicate calls serialize and
+    add latency rather than overlapping.
+    """
+    if bracket_coro is None:
+        bracket_coro = spellbook.estimate_bracket([commander_name], decklist)
+    if combo_coro is None:
+        combo_coro = spellbook.find_decklist_combos([commander_name], decklist)
 
     results = await asyncio.gather(bracket_coro, combo_coro, return_exceptions=True)
 
