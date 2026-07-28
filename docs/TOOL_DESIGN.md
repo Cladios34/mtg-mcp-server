@@ -712,6 +712,29 @@ Compare prices across multiple cards using bulk data.
 | Backends | Bulk data (required) |
 | Annotations | readOnly=true, idempotent=true, openWorld=true |
 
+### `deck_mechanic_map`
+Map the mechanics a deck SHARES, rather than the cards it contains. Every other tool here is indexed by card; this one is indexed by mechanic.
+
+| Field | Detail |
+|-------|--------|
+| Input | `decklist: list[str]`, `commander: str`, `response_format: "detailed" \| "concise" = "detailed"` |
+| Output | Markdown with: per-mechanic carrier counts and activation costs, cost tiers, what each cost reducer ACTUALLY reduces (601.2f), tribal counts split into printed / changeling (702.73a) / conditional, and trigger reach (per-source vs per-combat) |
+| Backends | Bulk data (optional) + Scryfall (required, fallback resolution) |
+| Data | `mechanics`, `type_synergy`, `triggers`, `unresolved` |
+| Annotations | readOnly=true, idempotent=true, openWorld=true |
+| Origin | A deck running 15 cards with one shared keyword was described in every deliverable as a loop toward a single card. No card-indexed tool could show otherwise. |
+
+### `cost_reduction_check`
+Apply a cost reducer to a set of costs mechanically, and name what it does NOT reduce.
+
+| Field | Detail |
+|-------|--------|
+| Input | `reducer_card: str`, `target_costs: list[str] \| None`, `target_cards: list[str] \| None`, `keyword: str \| None`, `response_format: "detailed" \| "concise" = "detailed"` |
+| Output | Per-target `reduced` / `result` / `reason`, plus the count actually reduced out of the total |
+| Backends | Bulk data (optional) + Scryfall (required, fallback resolution) |
+| Annotations | readOnly=true, idempotent=true, openWorld=true |
+| Origin | Rule 601.2f applied by hand produced two wrong numbers on the same card, in opposite directions. |
+
 ---
 
 ## Rules Engine Tools (orchestrator, no namespace)
