@@ -380,10 +380,13 @@ class TestToolSchemaCompleteness:
         """Server exposes the expected number of tools."""
         tools = await mcp_client.list_tools()
         tool_names = sorted(t.name for t in tools)
-        # 71 -> 72 with deck_audit_bundle (2026-07-24). When adding a tool, update
-        # BOTH this count and its twin in tests/integration/test_orchestrator_e2e.py.
-        assert len(tools) == 72, f"Expected 72 tools, got {len(tools)}.\nTools: {tool_names}"
+        # 71 -> 72 with deck_audit_bundle (2026-07-24); 72 -> 74 with deck_mechanic_map
+        # and cost_reduction_check (2026-07-28). When adding a tool, update BOTH this
+        # count and its twin in tests/integration/test_orchestrator_e2e.py.
+        assert len(tools) == 74, f"Expected 74 tools, got {len(tools)}.\nTools: {tool_names}"
         assert "deck_audit_bundle" in tool_names
+        assert "deck_mechanic_map" in tool_names
+        assert "cost_reduction_check" in tool_names
 
     async def test_no_context_parameter_exposed(self, mcp_client: Client):
         """No tool should expose 'ctx' (Context) as a user-visible parameter."""

@@ -16,7 +16,7 @@ so tool names stay clean (e.g. ``commander_overview``, not
 from __future__ import annotations
 
 from contextlib import AsyncExitStack
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import structlog
 from fastmcp import Context, FastMCP
@@ -464,12 +464,28 @@ async def deck_analysis(
         Literal["detailed", "concise"],
         Field(description="Output verbosity: 'detailed' (default) or 'concise'"),
     ] = "detailed",
+    declared_categories: Annotated[
+        list[dict[str, Any]] | None,
+        Field(
+            description=(
+                "Counts the deck's owner stated, checked against the actual list. Each "
+                "entry is {name, filter, expected} — e.g. "
+                '{"name": "cheap creatures", "filter": "mv<=1 t:creature", "expected": 13}. '
+                "Filter supports mv/cmc comparisons, t:, o:, name:, kw:. An entry may "
+                "carry an explicit {name, cards, expected} instead of a filter."
+            )
+        ),
+    ] = None,
 ) -> ToolResult:
     """Full decklist health check — mana curve, colors, combos, bracket, budget, synergy.
 
     Uses all available backends: Scryfall bulk data for rate-limit-free card resolution,
     Scryfall API as fallback, Spellbook for combos and bracket estimation, EDHREC for
     synergy scores. Degrades gracefully if optional backends are unavailable.
+
+    Pass ``declared_categories`` for any count the deck's owner asserted: it is measured
+    against the list and reported as drift. A number stated once and never re-checked is
+    how a deck ends up evaluated against a composition it no longer has.
     """
     from mtg_mcp_server.workflows.analysis import deck_analysis as impl
 
@@ -486,10 +502,109 @@ async def deck_analysis(
             edhrec=_edhrec,
             on_progress=lambda step, total: _progress(ctx, step, total),
             response_format=response_format,
+            declared_categories=declared_categories,
         )
         return ToolResult(content=result.markdown, structured_content=result.data)
     except ServiceError as exc:
         raise ToolError(f"deck_analysis failed: {exc}") from exc
+
+
+@workflow_mcp.tool(annotations=TOOL_ANNOTATIONS, tags=TAGS_COMMANDER)
+async def deck_mechanic_map(
+    decklist: Annotated[list[str], Field(description="Card names in the deck")],
+    commander: Annotated[
+        str, Field(description="The commander — its keywords seed the mechanic detection")
+    ],
+    response_format: Annotated[
+        Literal["detailed", "concise"],
+        Field(description="Output verbosity: 'detailed' (default) or 'concise'"),
+    ] = "detailed",
+) -> ToolResult:
+    """Map the mechanics a deck SHARES — keyword carriers, tribal counts, trigger reach.
+
+    Every other tool here is indexed by card. This one is indexed by mechanic, and
+    answers what per-card data cannot:
+
+    - how many cards carry the commander's keyword (a deck with 15 carriers is not a
+      loop toward one card, it is 15 destinations);
+    - what a cost reducer ACTUALLY reduces, counted rather than assumed (rule 601.2f:
+      a generic reduction never touches coloured pips);
+    - who really has the tribal type, including changelings — every creature type by
+      rule 702.73a, and invisible to a type-line search;
+    - which triggers multiply per attacking creature versus firing once per combat.
+
+    Run this before writing any description of how a deck works.
+    """
+    from mtg_mcp_server.workflows.mechanic_map import deck_mechanic_map as impl
+
+    if not decklist:
+        raise ToolError("Provide at least one card in the decklist.")
+
+    try:
+        result = await impl(
+            decklist,
+            commander,
+            bulk=_bulk,
+            scryfall=_require_scryfall(),
+            response_format=response_format,
+        )
+        return ToolResult(content=result.markdown, structured_content=result.data)
+    except ServiceError as exc:
+        raise ToolError(f"deck_mechanic_map failed: {exc}") from exc
+
+
+@workflow_mcp.tool(annotations=TOOL_ANNOTATIONS, tags=TAGS_RULES)
+async def cost_reduction_check(
+    reducer_card: Annotated[
+        str, Field(description="The card doing the reducing — its oracle text sets the amount")
+    ],
+    target_costs: Annotated[
+        list[str] | None,
+        Field(description="Raw mana costs to test, e.g. ['{U}{B}', '{2}{U}{U}']"),
+    ] = None,
+    target_cards: Annotated[
+        list[str] | None,
+        Field(description="Card names to test instead of raw costs"),
+    ] = None,
+    keyword: Annotated[
+        str | None,
+        Field(
+            description=(
+                "When testing cards, the keyword whose ACTIVATION cost is the target "
+                "(e.g. 'Ninjutsu') rather than the card's own mana cost"
+            )
+        ),
+    ] = None,
+    response_format: Annotated[
+        Literal["detailed", "concise"],
+        Field(description="Output verbosity: 'detailed' (default) or 'concise'"),
+    ] = "detailed",
+) -> ToolResult:
+    """Apply a cost reducer to costs mechanically, and say what it does NOT reduce.
+
+    Rule 601.2f: a generic cost reduction reduces the generic component only. Coloured
+    pips, {C}, hybrids and {X} survive it — two reducers do not take {U}{B} to {0}.
+    Use this instead of doing the arithmetic in prose; the prose version has been wrong
+    in both directions on the same card.
+    """
+    from mtg_mcp_server.workflows.cost_reduction import cost_reduction_check as impl
+
+    if not target_costs and not target_cards:
+        raise ToolError("Provide target_costs or target_cards — there is nothing to test.")
+
+    try:
+        result = await impl(
+            reducer_card,
+            bulk=_bulk,
+            scryfall=_require_scryfall(),
+            target_costs=target_costs,
+            target_cards=target_cards,
+            keyword=keyword,
+            response_format=response_format,
+        )
+        return ToolResult(content=result.markdown, structured_content=result.data)
+    except ServiceError as exc:
+        raise ToolError(f"cost_reduction_check failed: {exc}") from exc
 
 
 @workflow_mcp.tool(annotations=TOOL_ANNOTATIONS, tags=TAGS_DRAFT)
@@ -1469,13 +1584,16 @@ async def deck_audit_bundle(
         Field(description="Card names to force-classify as non-mana in the simulation"),
     ] = None,
 ) -> ToolResult:
-    """Full mechanical audit battery in ONE call — validation, analysis, combos, bracket, v3 simulation.
+    """Full mechanical audit battery in ONE call — validation, analysis, combos, bracket, commander rulings, v3 simulation.
 
-    Runs the five sections concurrently and returns one report where every
+    Runs the six sections concurrently and returns one report where every
     section carries an explicit ok/error status and echoes the parameters it
     used. A failed section NEVER fails the whole bundle: it is reported as
     ``ok: false`` with its error, next to the sections that succeeded.
     Simulation is forced to v3 (``commander_colors`` + ``tutor_aware=True``).
+    The rulings section ships the commander's official rulings and oracle text
+    with the audit: confront each ruling with your own claims — fetching them
+    is not reading them.
     """
     from mtg_mcp_server.workflows.audit_bundle import deck_audit_bundle as impl
 
@@ -1564,11 +1682,34 @@ async def hand_probability(
         int | None,
         Field(description="Maximum matching cards to count as a hit (inclusive, default: no cap)"),
     ] = None,
+    decklist: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "The actual decklist. Supplied with category_filter, 'copies' is counted "
+                "from it instead of trusted, and any disagreement is reported as drift."
+            )
+        ),
+    ] = None,
+    category_filter: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Filter defining the category to count in decklist, e.g. 'mv<=1 t:creature'. "
+                "Supports mv/cmc comparisons, t:, o:, name:, kw:."
+            )
+        ),
+    ] = None,
 ) -> ToolResult:
     """Compute the exact hypergeometric probability of seeing a card category.
 
     Answers questions like "what are the odds I've seen at least 1 of my 3
     tutors by turn 4?" via the closed-form hypergeometric distribution.
+
+    Pass ``decklist`` + ``category_filter`` to have the count MEASURED rather than
+    stated. A probability computed from a number nobody re-checked is the failure this
+    guards against: a category declared at 13 that had quietly become 11 moved the
+    headline statistic by 6.5 points, unnoticed across every revision.
     """
     from mtg_mcp_server.workflows.simulation import hand_probability as impl
 
@@ -1579,6 +1720,10 @@ async def hand_probability(
             cards_seen,
             min_count=min_count,
             max_count=max_count,
+            decklist=decklist,
+            category_filter=category_filter,
+            bulk=_bulk,
+            scryfall=_scryfall,
         )
         return ToolResult(content=result.markdown, structured_content=result.data)
     except ValueError as exc:

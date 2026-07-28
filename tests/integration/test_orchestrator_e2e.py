@@ -20,15 +20,18 @@ pytestmark = pytest.mark.integration
 class TestToolRegistration:
     """Verify the orchestrator exposes the expected tools."""
 
-    async def test_all_72_tools_registered(self, mcp_client: Client):
-        """The orchestrator exposes exactly 72 tools."""
+    async def test_all_74_tools_registered(self, mcp_client: Client):
+        """The orchestrator exposes exactly 74 tools."""
         tools = await mcp_client.list_tools()
         tool_names = sorted(t.name for t in tools)
         # 1 ping + 6 scryfall + 4 spellbook + 2 draft + 2 edhrec + 4 moxfield + 3 spicerack
-        # + 4 goldfish + 9 bulk + 32 workflows + 5 rules = 72
-        # Workflows went 31 -> 32 with deck_audit_bundle (2026-07-24).
-        assert len(tools) == 72, f"Expected 72 tools, got {len(tools)}.\nTools: {tool_names}"
+        # + 4 goldfish + 9 bulk + 34 workflows + 5 rules = 74
+        # Workflows went 31 -> 32 with deck_audit_bundle (2026-07-24), then 32 -> 34 with
+        # deck_mechanic_map and cost_reduction_check (2026-07-28).
+        assert len(tools) == 74, f"Expected 74 tools, got {len(tools)}.\nTools: {tool_names}"
         assert "deck_audit_bundle" in tool_names
+        assert "deck_mechanic_map" in tool_names
+        assert "cost_reduction_check" in tool_names
 
     async def test_no_mtgjson_tools(self, mcp_client: Client):
         """No tool names contain 'mtgjson' (replaced by Scryfall bulk data)."""
@@ -43,6 +46,36 @@ class TestToolRegistration:
         tool_names = {t.name for t in tools}
         assert "bulk_card_lookup" in tool_names
         assert "bulk_card_search" in tool_names
+
+
+class TestParamsEcho:
+    """Every tool response echoes what the server received — through the real server.
+
+    The unit test for the middleware runs against a toy server. This one proves the
+    middleware is actually wired into the orchestrator, which is the part that was
+    missing when an HTML-escaping client survived roughly forty calls unnoticed.
+    """
+
+    async def test_echo_present_on_a_real_tool(self, mcp_client: Client):
+        result = await mcp_client.call_tool("scryfall_card_details", {"name": "Sol Ring"})
+        assert result.structured_content is not None
+        assert result.structured_content["params_received"] == {"name": "Sol Ring"}
+
+    async def test_escaped_operator_is_visible_in_the_echo(self, mcp_client: Client):
+        # Whatever the search returns, the mangled input is inspectable on the spot.
+        result = await mcp_client.call_tool(
+            "scryfall_search_cards", {"query": "t:creature"}, raise_on_error=False
+        )
+        if result.structured_content is not None:
+            assert result.structured_content["params_received"]["query"] == "t:creature"
+
+    async def test_search_reports_the_query_it_sent(self, mcp_client: Client):
+        result = await mcp_client.call_tool(
+            "scryfall_search_cards", {"query": "t:creature"}, raise_on_error=False
+        )
+        if result.structured_content is not None and not result.is_error:
+            assert result.structured_content["query_sent"] == "t:creature"
+            assert result.structured_content["query_was_escaped"] is False
 
 
 class TestScryfall:
