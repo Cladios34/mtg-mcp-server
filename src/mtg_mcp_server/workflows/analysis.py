@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
 from mtg_mcp_server.services.base import ServiceError
+from mtg_mcp_server.utils.declared import CategoryResult, evaluate_categories
 from mtg_mcp_server.utils.mana import count_pips
+from mtg_mcp_server.utils.triggers import derive_trigger
 from mtg_mcp_server.workflows import WorkflowResult
 from mtg_mcp_server.workflows.deck import build_synergy_lookup
 
@@ -137,6 +139,7 @@ async def deck_analysis(
     response_format: Literal["detailed", "concise"] = "detailed",
     bracket_coro: Awaitable[BracketEstimate] | None = None,
     combo_coro: Awaitable[DecklistCombos] | None = None,
+    declared_categories: list[dict[str, Any]] | None = None,
 ) -> WorkflowResult:
     """Full decklist health check using all available backends.
 
@@ -151,6 +154,9 @@ async def deck_analysis(
         bracket_coro: Optional in-flight bracket estimate to await instead of
             issuing a second one (see :func:`_fetch_spellbook_data`).
         combo_coro: Optional in-flight decklist-combos fetch, same rationale.
+        declared_categories: Counts the deck's owner stated, each ``{name, filter,
+            expected}`` (or ``{name, cards, expected}``). Measured against the actual
+            list so a stated number becomes a checked constraint instead of a note.
 
     Returns:
         WorkflowResult with markdown and structured data.
@@ -172,7 +178,9 @@ async def deck_analysis(
     if on_progress is not None:
         await on_progress(1, 3)
 
-    resolved_cards, failures = await _resolve_cards(decklist, bulk=bulk, scryfall=scryfall)
+    resolved_cards, failures, full_cards = await _resolve_cards(
+        decklist, bulk=bulk, scryfall=scryfall
+    )
 
     # Step 2/3: Combo/bracket analysis
     if on_progress is not None:
@@ -204,6 +212,19 @@ async def deck_analysis(
     # Compute budget from resolved cards (prices already populated)
     total_price, avg_price, priced_count = _compute_budget(resolved_cards)
 
+    # Measure whatever the owner declared against what the list actually holds.
+    categories = evaluate_categories(declared_categories or [], full_cards)
+
+    # Triggers that multiply with the number of attacking creatures are worth more
+    # than triggers that cap at one per combat, and the oracle wordings are close
+    # enough that the difference gets read straight past.
+    triggers = [(card, derive_trigger(card)) for card in full_cards]
+    multiplying = [
+        {"name": card.name, "condition": trigger.condition}
+        for card, trigger in triggers
+        if trigger.scope == "per_source" and trigger.sources == "class"
+    ]
+
     # Format output
     markdown = _format_output(
         commander_name=commander_name,
@@ -219,6 +240,8 @@ async def deck_analysis(
         failures=failures,
         sources=sources,
         response_format=response_format,
+        categories=categories,
+        multiplying_triggers=multiplying,
     )
     data: dict[str, object] = {
         "commander_name": commander_name,
@@ -233,6 +256,9 @@ async def deck_analysis(
         "avg_price": avg_price,
         "priced_count": priced_count,
         "low_synergy": [{"name": n, "synergy": s} for n, s in low_synergy],
+        "declared_categories": [c.to_dict() for c in categories],
+        "category_drift": [c.name for c in categories if c.drifted],
+        "multiplying_triggers": multiplying,
         "unresolved": failures,
         "sources": {
             "scryfall": sources.scryfall_ok,
@@ -254,8 +280,13 @@ async def _resolve_cards(
     *,
     bulk: ScryfallBulkClient | None,
     scryfall: ScryfallClient,
-) -> tuple[list[_ResolvedCard], list[str]]:
-    """Resolve all cards in the decklist using bulk-data-first fallback."""
+) -> tuple[list[_ResolvedCard], list[str], list[Card]]:
+    """Resolve all cards in the decklist using bulk-data-first fallback.
+
+    Returns the trimmed rows the analytics need, the names nothing could resolve, and
+    the full cards — declared-category filters read type lines and oracle text, which
+    the trimmed row deliberately does not carry.
+    """
     from mtg_mcp_server.workflows.card_resolver import resolve_cards
 
     cards_by_name, unresolved = await resolve_cards(decklist, bulk=bulk, scryfall=scryfall)
@@ -263,6 +294,7 @@ async def _resolve_cards(
 
     resolved: list[_ResolvedCard] = []
     failures: list[str] = []
+    full: list[Card] = []
 
     for name in decklist:
         card = cards_by_name.get(name.lower())
@@ -271,6 +303,7 @@ async def _resolve_cards(
             # Add with defaults so curve still counts it
             resolved.append(_ResolvedCard(name=name))
         else:
+            full.append(card)
             resolved.append(
                 _ResolvedCard(
                     name=card.name,
@@ -280,7 +313,7 @@ async def _resolve_cards(
                 )
             )
 
-    return resolved, failures
+    return resolved, failures, full
 
 
 async def _fetch_spellbook_data(
@@ -405,6 +438,47 @@ def _compute_budget(
 # ---------------------------------------------------------------------------
 
 
+def _format_categories(categories: list[CategoryResult]) -> list[str]:
+    """Render the declared-category check, drift first."""
+    if not categories:
+        return []
+
+    lines = ["## Declared Categories", ""]
+    lines.append("| Category | Declared | Actual | Drift |")
+    lines.append("|----------|----------|--------|-------|")
+    for category in categories:
+        expected = "-" if category.expected is None else str(category.expected)
+        drift = "-" if category.drift is None else f"{category.drift:+d}"
+        mark = " **<-- DRIFT**" if category.drifted else ""
+        lines.append(f"| {category.name} | {expected} | {category.actual} | {drift}{mark} |")
+    lines.append("")
+
+    drifted = [c for c in categories if c.drifted]
+    if drifted:
+        lines.append(
+            "**A count the deck's owner stated is no longer met.** Every probability "
+            "below was computed on the actual list, not on the declared one — check "
+            "which of the two the conclusions were written against:"
+        )
+        for category in drifted:
+            lines.append(
+                f"- {category.name}: declared {category.expected}, list holds "
+                f"{category.actual} ({category.drift:+d})"
+            )
+        lines.append("")
+
+    unparsed = [(c.name, c.unparsed) for c in categories if c.unparsed]
+    for name, terms in unparsed:
+        lines.append(
+            f"*{name}: these filter terms were not understood and did NOT restrict the "
+            f"count: {', '.join(terms)}*"
+        )
+    if unparsed:
+        lines.append("")
+
+    return lines
+
+
 def _format_output(
     *,
     commander_name: str,
@@ -420,11 +494,29 @@ def _format_output(
     failures: list[str],
     sources: _DataSources,
     response_format: Literal["detailed", "concise"] = "detailed",
+    categories: list[CategoryResult] | None = None,
+    multiplying_triggers: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build the markdown output for deck analysis."""
     lines: list[str] = []
     lines.append(f"# Deck Analysis \u2014 {commander_name}")
     lines.append("")
+
+    # Declared categories go FIRST when one of them has drifted. A stated count that
+    # the list no longer honours changes how everything below should be read, so it
+    # cannot sit at the bottom of the report.
+    lines.extend(_format_categories(categories or []))
+
+    if multiplying_triggers:
+        lines.append("## Triggers That Multiply")
+        lines.append("")
+        lines.append(
+            "These fire once per QUALIFYING CREATURE, not once per combat \u2014 their output "
+            "scales with how many connect. A card that caps at one is not the same card:"
+        )
+        for entry in multiplying_triggers:
+            lines.append(f"- {entry['name']} \u2014 on {entry['condition']}")
+        lines.append("")
 
     # Mana Curve (always included)
     lines.append("## Mana Curve")
@@ -458,7 +550,11 @@ def _format_output(
     lines.append("## Combos & Bracket")
     lines.append("")
     if bracket is not None:
-        lines.append(f"**Bracket:** {bracket.bracket_tag or 'Unknown'}" if bracket.bracket_tag_name in (None, bracket.bracket_tag) else f"**Bracket:** {bracket.bracket_tag} ({bracket.bracket_tag_name})")
+        lines.append(
+            f"**Bracket:** {bracket.bracket_tag or 'Unknown'}"
+            if bracket.bracket_tag_name in (None, bracket.bracket_tag)
+            else f"**Bracket:** {bracket.bracket_tag} ({bracket.bracket_tag_name})"
+        )
     else:
         lines.append("**Bracket:** Unknown (Spellbook unavailable)")
 
