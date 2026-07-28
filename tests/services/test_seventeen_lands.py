@@ -100,9 +100,7 @@ class TestCardRatings:
         """The new endpoint wraps rows in {copyright, notes, data}."""
         fixture = _load_fixture("card_ratings_lci.json")
         wrapped = {"copyright": "17Lands", "notes": "", "data": fixture}
-        respx.get(f"{BASE_URL}/api/card_data").mock(
-            return_value=httpx.Response(200, json=wrapped)
-        )
+        respx.get(f"{BASE_URL}/api/card_data").mock(return_value=httpx.Response(200, json=wrapped))
 
         async with SeventeenLandsClient(base_url=BASE_URL) as client:
             ratings = await client.card_ratings("LCI")

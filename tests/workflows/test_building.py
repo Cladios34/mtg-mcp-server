@@ -608,9 +608,7 @@ class TestCompleteDeck:
 
         assert result.markdown is not None
 
-    async def test_suggestions_filtered_by_commander_identity(
-        self, mock_bulk: AsyncMock
-    ) -> None:
+    async def test_suggestions_filtered_by_commander_identity(self, mock_bulk: AsyncMock) -> None:
         """Suggestions are constrained to the commander's color identity.
 
         Regression test (2026-07-22): a Mardu (WBR) deck received green
@@ -672,9 +670,7 @@ class TestCompleteDeck:
         """
         from mtg_mcp_server.workflows.building import _categorize_card
 
-        sol_ring = _mock_card(
-            "Sol Ring", type_line="Artifact", oracle_text="{T}: Add {C}{C}."
-        )
+        sol_ring = _mock_card("Sol Ring", type_line="Artifact", oracle_text="{T}: Add {C}{C}.")
         signet = _mock_card(
             "Boros Signet",
             type_line="Artifact",
@@ -683,9 +679,7 @@ class TestCompleteDeck:
         arcane = _mock_card(
             "Arcane Signet",
             type_line="Artifact",
-            oracle_text=(
-                "{T}: Add one mana of any color in your commander's color identity."
-            ),
+            oracle_text=("{T}: Add one mana of any color in your commander's color identity."),
         )
         whip = _mock_card(
             "Whip of Erebos",
@@ -723,8 +717,7 @@ class TestCompleteDeck:
             "Gisela, Blade of Goldnight",
             type_line="Legendary Creature - Angel",
             oracle_text=(
-                "If a source would deal damage to an opponent, it deals double "
-                "that damage instead."
+                "If a source would deal damage to an opponent, it deals double that damage instead."
             ),
         )
 

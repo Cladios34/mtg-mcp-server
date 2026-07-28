@@ -379,11 +379,7 @@ class BracketEstimate(BaseModel):
     @property
     def two_card_combos(self) -> list[str]:
         """Combos classified as (at least arguably) two-card."""
-        return [
-            c.description
-            for c in self.combos
-            if c.definitely_two_card or c.arguably_two_card
-        ]
+        return [c.description for c in self.combos if c.definitely_two_card or c.arguably_two_card]
 
     @computed_field  # type: ignore[prop-decorator]
     @property

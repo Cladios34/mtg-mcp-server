@@ -319,6 +319,10 @@ class TestTotalDecksCurrentSchema:
         from mtg_mcp_server.services.edhrec import EDHRECClient
 
         client = EDHRECClient.__new__(EDHRECClient)
-        data = {"header": "X (Commander)", "num_decks_avg": 19741, "container": {"json_dict": {"cardlists": []}}}
+        data = {
+            "header": "X (Commander)",
+            "num_decks_avg": 19741,
+            "container": {"json_dict": {"cardlists": []}},
+        }
         result = client._parse_commander_data(data, "X")
         assert result.total_decks == 19741

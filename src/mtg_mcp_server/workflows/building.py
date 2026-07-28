@@ -647,11 +647,14 @@ def _card_roles(card: Card) -> list[str]:
     # text often reads just "{T}: Add {C}." without the words "mana" or "land",
     # so the generic ramp check below silently misses them (measured 2026-07-22:
     # a Commander deck with 11 rocks reported ramp=3).
-    if "{t}: add {" in oracle_lower or "{t}: add one mana" in oracle_lower:
-        roles.append("ramp")
-    elif any(
-        t in oracle_lower for t in ["add {", "add one mana", "search your library for a"]
-    ) and ("land" in oracle_lower or "mana" in oracle_lower):
+    if (
+        "{t}: add {" in oracle_lower
+        or "{t}: add one mana" in oracle_lower
+        or (
+            any(t in oracle_lower for t in ["add {", "add one mana", "search your library for a"])
+            and ("land" in oracle_lower or "mana" in oracle_lower)
+        )
+    ):
         roles.append("ramp")
     if any(t in oracle_lower for t in _DRAW_PATTERNS) or any(
         t in oracle_lower for t in _RECURSION_PATTERNS
