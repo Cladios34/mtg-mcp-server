@@ -20,11 +20,25 @@ class TestServerHealth:
         assert result.content[0].text == "pong"
 
     async def test_all_tools_registered(self, live_client):
+        """The running server exposes exactly what this build registers.
+
+        Derived from the server itself rather than hardcoded: the count lived in
+        three files, and this copy sat at 69 while the other two had moved on —
+        the assertion meant to catch a missing tool was itself stale.
+        """
+        from fastmcp import Client
+
+        from mtg_mcp_server.server import mcp
+
+        async with Client(transport=mcp) as local:
+            expected = {t.name for t in await local.list_tools()}
+
         tools = await live_client.list_tools()
         tool_names = {t.name for t in tools}
-        # 1 ping + 6 scryfall + 4 spellbook + 2 draft + 2 edhrec + 4 moxfield + 3 spicerack + 4 goldfish + 9 bulk + 29 workflows + 5 rules = 69
-        assert len(tool_names) == 69, (
-            f"Expected 69 tools, got {len(tool_names)}: {sorted(tool_names)}"
+        assert tool_names == expected, (
+            f"Live server differs from this build. "
+            f"Missing: {sorted(expected - tool_names)}. "
+            f"Unexpected: {sorted(tool_names - expected)}"
         )
 
     async def test_no_mtgjson_tools(self, live_client):
