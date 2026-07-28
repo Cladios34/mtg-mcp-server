@@ -22,6 +22,7 @@ import structlog
 
 from mtg_mcp_server.utils.color_identity import parse_color_identity
 from mtg_mcp_server.utils.decklist import parse_decklist
+from mtg_mcp_server.utils.declared import CategoryResult, evaluate_categories
 from mtg_mcp_server.utils.mana import count_pips
 from mtg_mcp_server.workflows import WorkflowResult
 
@@ -84,6 +85,11 @@ async def hand_probability(
     cards_seen: int = 7,
     min_count: int = 1,
     max_count: int | None = None,
+    *,
+    decklist: list[str] | None = None,
+    category_filter: str | None = None,
+    bulk: ScryfallBulkClient | None = None,
+    scryfall: ScryfallClient | None = None,
 ) -> WorkflowResult:
     """Compute the exact hypergeometric probability of seeing a card category.
 
@@ -91,18 +97,62 @@ async def hand_probability(
     tutors by turn 4?" via the closed-form hypergeometric distribution -- no
     simulation involved.
 
+    When ``decklist`` and ``category_filter`` are supplied, ``copies`` is MEASURED
+    from the list rather than trusted. That link is the point: a deck's owner once
+    declared 13 cards in a category, the list ended up holding 11, and the resulting
+    probability moved from 63.91% to 57.36% with nothing connecting the number to the
+    list it was supposed to describe. A ``copies`` argument that disagrees with the
+    measurement is reported as drift, not silently honoured.
+
     Args:
         deck_size: Total cards in the library (N). Defaults to 99 (Commander).
-        copies: Number of matching cards in the deck (K).
+        copies: Number of matching cards in the deck (K). Ignored (and checked for
+            drift) when the category is measured from ``decklist``.
         cards_seen: Cards drawn/seen so far (n). Defaults to 7 (opening hand).
         min_count: Minimum matching cards to count as a hit (inclusive).
         max_count: Maximum matching cards to count as a hit (inclusive).
             Defaults to the largest possible count (``min(cards_seen, copies)``).
+        decklist: The actual list, so the category can be counted instead of stated.
+        category_filter: A small filter expression, e.g. ``"mv<=1 t:creature"``.
+        bulk: Bulk data client, used to resolve ``decklist``.
+        scryfall: Scryfall client, used for whatever bulk data misses.
 
     Returns:
         WorkflowResult with a PMF table and the requested cumulative probability.
     """
     log.info("hand_probability.start", deck_size=deck_size, copies=copies, cards_seen=cards_seen)
+
+    declared_copies: int | None = None
+    declared_deck_size: int | None = None
+    category: CategoryResult | None = None
+    if decklist and category_filter and scryfall is not None:
+        from mtg_mcp_server.workflows.card_resolver import resolve_cards
+
+        cards_by_name, _ = await resolve_cards(decklist, bulk=bulk, scryfall=scryfall)
+        unique = list({c.name: c for c in cards_by_name.values()}.values())
+        category = evaluate_categories(
+            [{"name": category_filter, "filter": category_filter, "expected": copies}], unique
+        )[0]
+        declared_copies = copies
+        copies = category.actual
+
+        # The population must come from the same list as the successes. Measuring
+        # `copies` off a 60-card list while N stayed at the 99-card default produced a
+        # probability that was wrong AND presented under a "measured from the decklist"
+        # banner — precisely the confident-but-false number this parameter exists to
+        # eliminate. An explicit deck_size still wins, but the mismatch is reported.
+        if deck_size != len(decklist):
+            declared_deck_size = deck_size
+            deck_size = len(decklist)
+
+        log.info(
+            "hand_probability.measured",
+            filter=category_filter,
+            declared=declared_copies,
+            actual=copies,
+            deck_size=deck_size,
+            declared_deck_size=declared_deck_size,
+        )
 
     for label, value in (
         ("deck_size", deck_size),
@@ -133,6 +183,39 @@ async def hand_probability(
         f"**Deck Size:** {deck_size}  **Copies:** {copies}  **Cards Seen:** {cards_seen}",
         f"**Expectation:** {expectation:.2f} copies seen on average",
         "",
+    ]
+
+    if category is not None:
+        lines.append(
+            f"**Copies measured from the decklist** with filter `{category.filter}`: "
+            f"{category.actual} card(s)."
+        )
+        if declared_deck_size is not None:
+            lines.append("")
+            lines.append(
+                f"**Deck size corrected to {deck_size}** — the list holds {deck_size} "
+                f"cards, not the {declared_deck_size} passed in. Both the successes and "
+                f"the population now come from the same list; pass deck_size explicitly "
+                f"only if you mean a library that differs from the list you supplied."
+            )
+        if category.drifted:
+            lines.append("")
+            lines.append(
+                f"**DRIFT — declared {declared_copies}, list holds {category.actual} "
+                f"({category.drift:+d}).** The probability below is computed on the "
+                f"actual {category.actual}, not on the declared {declared_copies}. "
+                f"If a conclusion elsewhere was written against the declared figure, "
+                f"it is now wrong."
+            )
+        if category.unparsed:
+            lines.append("")
+            lines.append(
+                f"*Filter terms not understood, which did NOT restrict the count: "
+                f"{', '.join(category.unparsed)}*"
+            )
+        lines.append("")
+
+    lines += [
         "## Probability Mass Function",
         "",
         "| Copies Seen (k) | Probability |",
@@ -152,6 +235,10 @@ async def hand_probability(
         "max_count": upper,
         "probability": probability,
         "expectation": expectation,
+        "declared_copies": declared_copies,
+        "declared_deck_size": declared_deck_size,
+        "copies_measured": category is not None,
+        "category": category.to_dict() if category is not None else None,
         "pmf": {str(k): p for k, p in pmf.items()},
     }
     return WorkflowResult(markdown="\n".join(lines), data=data)

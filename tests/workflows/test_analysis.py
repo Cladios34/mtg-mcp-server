@@ -641,3 +641,147 @@ class TestDeckAnalysisResponseFormat:
         # Concise omits Budget and Data Sources
         assert "Budget" not in concise.markdown
         assert "**Data Sources:**" not in concise.markdown
+
+
+class TestDeclaredCategories:
+    """A count the owner stated becomes a measured constraint (2026-07-27).
+
+    The owner declared 13 cards in a category. The list had 13. Work took it to 11
+    and nothing said so, while the probability of opening one — the deck's single
+    most determining statistic — fell from 63.91% to 57.36%. The number was
+    recomputed at every revision and connected to nothing.
+    """
+
+    async def test_drift_is_reported_in_data_and_markdown(self):
+        result = await deck_analysis(
+            SAMPLE_DECKLIST,
+            COMMANDER,
+            bulk=_make_bulk(),
+            scryfall=_make_scryfall(),
+            spellbook=_make_spellbook(),
+            edhrec=_make_edhrec(),
+            declared_categories=[
+                {"name": "cheap creatures", "filter": "mv<=1 t:creature", "expected": 5}
+            ],
+        )
+        category = result.data["declared_categories"][0]
+        assert category["expected"] == 5
+        assert category["actual"] == 2  # Sol Ring and Spore Frog resolve at mv 1
+        assert category["drift"] == -3
+        assert result.data["category_drift"] == ["cheap creatures"]
+        assert "DRIFT" in result.markdown
+
+    async def test_matching_declaration_is_not_flagged(self):
+        result = await deck_analysis(
+            SAMPLE_DECKLIST,
+            COMMANDER,
+            bulk=_make_bulk(),
+            scryfall=_make_scryfall(),
+            spellbook=_make_spellbook(),
+            edhrec=_make_edhrec(),
+            declared_categories=[
+                {"name": "cheap creatures", "filter": "mv<=1 t:creature", "expected": 2}
+            ],
+        )
+        assert result.data["category_drift"] == []
+        assert "DRIFT" not in result.markdown
+
+    async def test_no_declaration_adds_no_section(self):
+        result = await deck_analysis(
+            SAMPLE_DECKLIST,
+            COMMANDER,
+            bulk=_make_bulk(),
+            scryfall=_make_scryfall(),
+            spellbook=_make_spellbook(),
+            edhrec=_make_edhrec(),
+        )
+        assert result.data["declared_categories"] == []
+        assert "Declared Categories" not in result.markdown
+
+
+class TestMultiplyingTriggers:
+    """Per-source triggers are called out; per-combat ones are not (2026-07-27)."""
+
+    async def test_per_source_trigger_is_surfaced(self):
+        yuriko_style = _make_card("Yuriko, the Tiger's Shadow")
+        yuriko_style = yuriko_style.model_copy(
+            update={
+                "oracle_text": (
+                    "Whenever a Ninja you control deals combat damage to a player, "
+                    "reveal the top card of your library."
+                )
+            }
+        )
+        cards = {"yuriko, the tiger's shadow": yuriko_style}
+        result = await deck_analysis(
+            ["Yuriko, the Tiger's Shadow"],
+            COMMANDER,
+            bulk=_make_bulk(cards),
+            scryfall=_make_scryfall(cards),
+            spellbook=_make_spellbook(),
+            edhrec=_make_edhrec(),
+        )
+        names = [t["name"] for t in result.data["multiplying_triggers"]]
+        assert "Yuriko, the Tiger's Shadow" in names
+        assert "Triggers That Multiply" in result.markdown
+
+    async def test_per_combat_trigger_is_not_listed_as_multiplying(self):
+        thief = _make_card("Prosperous Thief").model_copy(
+            update={
+                "oracle_text": (
+                    "Whenever one or more Ninja you control deal combat damage to a "
+                    "player, add {U}{U}."
+                )
+            }
+        )
+        cards = {"prosperous thief": thief}
+        result = await deck_analysis(
+            ["Prosperous Thief"],
+            COMMANDER,
+            bulk=_make_bulk(cards),
+            scryfall=_make_scryfall(cards),
+            spellbook=_make_spellbook(),
+            edhrec=_make_edhrec(),
+        )
+        assert result.data["multiplying_triggers"] == []
+
+
+class TestDeckSizeMatchesTheList:
+    """Successes and population must come from the same list.
+
+    Adversarial review (2026-07-28): measuring `copies` off a 60-card list while N
+    stayed at the 99-card default produced a probability that was wrong AND displayed
+    under a "measured from the decklist" banner — the confident-but-false number this
+    parameter exists to eliminate.
+    """
+
+    async def test_deck_size_is_derived_from_the_list(self):
+        from mtg_mcp_server.workflows.simulation import hand_probability
+
+        deck = [f"Card {i}" for i in range(60)]
+        bulk = _make_bulk({f"card {i}": _make_card(f"Card {i}", cmc=1.0) for i in range(60)})
+        result = await hand_probability(
+            decklist=deck,
+            category_filter="mv<=1",
+            bulk=bulk,
+            scryfall=_make_scryfall({}),
+            copies=10,
+        )
+        assert result.data["deck_size"] == 60
+        assert result.data["declared_deck_size"] == 99
+        assert "Deck size corrected to 60" in result.markdown
+
+    async def test_explicit_deck_size_matching_the_list_is_not_flagged(self):
+        from mtg_mcp_server.workflows.simulation import hand_probability
+
+        deck = [f"Card {i}" for i in range(60)]
+        bulk = _make_bulk({f"card {i}": _make_card(f"Card {i}", cmc=1.0) for i in range(60)})
+        result = await hand_probability(
+            deck_size=60,
+            decklist=deck,
+            category_filter="mv<=1",
+            bulk=bulk,
+            scryfall=_make_scryfall({}),
+        )
+        assert result.data["declared_deck_size"] is None
+        assert "Deck size corrected" not in result.markdown
