@@ -10,10 +10,12 @@ import pytest
 from mtg_mcp_server.services.spellbook import SpellbookError
 from mtg_mcp_server.types import (
     BracketEstimate,
+    Card,
     Combo,
     ComboCard,
     ComboResult,
     DecklistCombos,
+    Ruling,
 )
 from mtg_mcp_server.workflows import WorkflowResult
 from mtg_mcp_server.workflows.audit_bundle import deck_audit_bundle
@@ -71,10 +73,17 @@ class TestHappyPath:
             spellbook=_make_spellbook(),
         )
         sections = _sections_by_name(result.data)
-        assert set(sections) == {"validate", "analysis", "combos", "bracket", "simulation"}
+        assert set(sections) == {
+            "validate",
+            "analysis",
+            "combos",
+            "bracket",
+            "rulings",
+            "simulation",
+        }
         assert all(s["ok"] for s in sections.values())
         assert result.data["failed_sections"] == []
-        assert "5/5 ok" in result.markdown
+        assert "6/6 ok" in result.markdown
 
     async def test_simulation_v3_forced(self, patched_impls: dict[str, AsyncMock]) -> None:
         await deck_audit_bundle(
@@ -359,3 +368,166 @@ class TestSpellbookCallDeduplication:
         kwargs = patched_impls["analysis"].await_args.kwargs
         assert kwargs["bracket_coro"] is not None
         assert kwargs["combo_coro"] is not None
+
+
+class TestRulingsSection:
+    """The rulings section (added 2026-07-27).
+
+    Origin: three rules errors in one audit all came from rulings that were
+    fetched through a separate, skippable call and then never confronted with
+    the report's own claims. Shipping them inside the bundle removes the option
+    of not looking — so the section must exist, must carry the oracle text, and
+    must be VISIBLE in the markdown, not only in structured_content.
+    """
+
+    @staticmethod
+    def _scryfall_with_rulings(comments: list[str]) -> AsyncMock:
+        scryfall = AsyncMock()
+        card = AsyncMock()
+        card.id = "abc-123"
+        card.name = "Yuriko, the Tiger's Shadow"
+        card.oracle_text = "Commander ninjutsu {U}{B}"
+        scryfall.get_card_by_name = AsyncMock(return_value=card)
+        scryfall.get_rulings = AsyncMock(
+            return_value=[
+                Ruling(source="wotc", published_at="2020-11-10", comment=c) for c in comments
+            ]
+        )
+        return scryfall
+
+    async def test_rulings_are_returned_with_oracle_text(self, patched_impls) -> None:
+        # The real ruling that was sitting unread during the Yuriko audit.
+        comment = "Activating commander ninjutsu won't increase the commander tax."
+        result = await deck_audit_bundle(
+            DECKLIST,
+            COMMANDER,
+            "mardu",
+            iterations=100,
+            bulk=AsyncMock(),
+            scryfall=self._scryfall_with_rulings([comment]),
+            spellbook=_make_spellbook(),
+        )
+        section = _sections_by_name(result.data)["rulings"]
+        assert section["ok"] is True
+        assert section["data"]["total_rulings"] == 1
+        assert section["data"]["rulings"][0]["comment"] == comment
+        # A ruling is unusable without the text it annotates.
+        assert section["data"]["oracle_text"] == "Commander ninjutsu {U}{B}"
+
+    async def test_rulings_count_is_surfaced_in_markdown(self, patched_impls) -> None:
+        """Buried in structured_content is exactly how they got ignored before."""
+        result = await deck_audit_bundle(
+            DECKLIST,
+            COMMANDER,
+            "mardu",
+            iterations=100,
+            bulk=AsyncMock(),
+            scryfall=self._scryfall_with_rulings(["a", "b"]),
+            spellbook=_make_spellbook(),
+        )
+        assert "2 official ruling(s)" in result.markdown
+
+    async def test_no_rulings_says_so_explicitly(self, patched_impls) -> None:
+        """Zero rulings is a fact to state, never a silently missing line."""
+        result = await deck_audit_bundle(
+            DECKLIST,
+            COMMANDER,
+            "mardu",
+            iterations=100,
+            bulk=AsyncMock(),
+            scryfall=self._scryfall_with_rulings([]),
+            spellbook=_make_spellbook(),
+        )
+        assert "rulings: none published" in result.markdown
+
+    async def test_signature_mechanic_carriers_ship_their_rulings(self, patched_impls) -> None:
+        """The commander's mechanic is carried by other cards, and they have rulings too.
+
+        The Yuriko audit reasoned about a signature mechanic from memory while the
+        rulings for the cards carrying it were one skippable call away.
+        """
+        yuriko = Card(
+            id="yuriko",
+            name="Yuriko, the Tiger's Shadow",
+            type_line="Legendary Creature — Human Ninja",
+            oracle_text="Commander ninjutsu {1}{U}{B}",
+            keywords=["Commander ninjutsu"],
+        )
+        thief = Card(
+            id="thief",
+            name="Prosperous Thief",
+            type_line="Creature — Ninja",
+            oracle_text="Ninjutsu {1}{U}",
+            keywords=["Ninjutsu"],
+        )
+
+        scryfall = AsyncMock()
+        scryfall.get_card_by_name = AsyncMock(return_value=yuriko)
+        scryfall.get_rulings = AsyncMock(
+            return_value=[Ruling(source="wotc", published_at="2020-11-10", comment="a ruling")]
+        )
+        bulk = AsyncMock()
+        bulk.get_card = AsyncMock(
+            side_effect=lambda name: thief if name.lower() == "prosperous thief" else None
+        )
+        scryfall.get_cards_collection = AsyncMock(return_value=([], []))
+
+        result = await deck_audit_bundle(
+            ["Prosperous Thief"],
+            "Yuriko, the Tiger's Shadow",
+            "ub",
+            iterations=100,
+            bulk=bulk,
+            scryfall=scryfall,
+            spellbook=_make_spellbook(),
+        )
+        data = _sections_by_name(result.data)["rulings"]["data"]
+        assert data["signature_mechanic"] == "Ninjutsu"
+        assert "Prosperous Thief" in data["signature_mechanic_cards"]
+        assert "signature mechanic 'Ninjutsu'" in result.markdown
+
+    async def test_commander_without_a_signature_mechanic_is_not_forced(
+        self, patched_impls
+    ) -> None:
+        """No signature keyword means no section noise, and no invented one."""
+        plain = Card(
+            id="plain",
+            name="Kaalia of the Vast",
+            type_line="Legendary Creature — Human Cleric",
+            oracle_text="Flying",
+            keywords=["Flying"],  # evergreen — never a signature mechanic
+        )
+        scryfall = AsyncMock()
+        scryfall.get_card_by_name = AsyncMock(return_value=plain)
+        scryfall.get_rulings = AsyncMock(return_value=[])
+
+        result = await deck_audit_bundle(
+            DECKLIST,
+            COMMANDER,
+            "mardu",
+            iterations=100,
+            bulk=AsyncMock(),
+            scryfall=scryfall,
+            spellbook=_make_spellbook(),
+        )
+        data = _sections_by_name(result.data)["rulings"]["data"]
+        assert data["signature_mechanic"] is None
+        assert data["signature_mechanic_cards"] == {}
+
+    async def test_rulings_failure_never_takes_the_audit_down(self, patched_impls) -> None:
+        """Silent-failure ban: the section reports its own error, the rest survives."""
+        scryfall = AsyncMock()
+        scryfall.get_card_by_name = AsyncMock(side_effect=RuntimeError("scryfall down"))
+        result = await deck_audit_bundle(
+            DECKLIST,
+            COMMANDER,
+            "mardu",
+            iterations=100,
+            bulk=AsyncMock(),
+            scryfall=scryfall,
+            spellbook=_make_spellbook(),
+        )
+        section = _sections_by_name(result.data)["rulings"]
+        assert section["ok"] is False
+        assert "scryfall down" in section["error"]
+        assert result.data["failed_sections"] == ["rulings"]
