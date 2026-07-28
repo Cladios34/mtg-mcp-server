@@ -24,7 +24,9 @@ from mtg_mcp_server.providers import (
 )
 from mtg_mcp_server.services.scryfall import CardNotFoundError, ScryfallClient, ScryfallError
 from mtg_mcp_server.utils.formatters import ResponseFormat, format_card_detail, format_card_line
+from mtg_mcp_server.utils.query_sanitize import escaping_warning, normalize_query
 from mtg_mcp_server.utils.slim import slim_card
+from mtg_mcp_server.utils.triggers import derive_trigger
 
 # Module-level client set by the lifespan. This pattern is required because
 # FastMCP's Depends()/lifespan_context DI doesn't propagate through mount().
@@ -88,11 +90,21 @@ async def search_cards(
     if limit < 0:
         raise ToolError(f"limit must be >= 0 (0 for all), got {limit}")
 
+    # Some clients HTML-escape the comparison operators on the way out, turning `mv<=3`
+    # into `mv&lt;=3`. Scryfall 404s on that, and a bare "No cards found" is indis-
+    # tinguable from a valid query with no matches — so we decode it AND say so.
+    sent_query, was_escaped = normalize_query(query)
+
     client = _get_client()
     try:
-        result = await client.search_cards(query, page=page)
+        result = await client.search_cards(sent_query, page=page)
     except CardNotFoundError as exc:
-        raise ToolError(f"No cards found for query: '{query}'. Check your search syntax.") from exc
+        raise ToolError(
+            f"No cards found for query: '{sent_query}'. "
+            f"This means zero matches, not necessarily bad syntax — "
+            f"widen the query rather than assuming the cards do not exist. "
+            f"(Sent to Scryfall verbatim: {sent_query!r})"
+        ) from exc
     except ScryfallError as exc:
         raise ToolError(f"Scryfall API error: {exc}") from exc
 
@@ -101,6 +113,8 @@ async def search_cards(
     total = len(result.data)
 
     lines = [f"Found {result.total_cards} cards (showing {showing} of {total}, page {page}):"]
+    if was_escaped:
+        lines.insert(0, escaping_warning(query, sent_query))
     for card in cards:
         lines.append(format_card_line(card, response_format=response_format))
     if showing < total:
@@ -110,7 +124,14 @@ async def search_cards(
     return ToolResult(
         content="\n".join(lines) + ATTRIBUTION_SCRYFALL,
         structured_content={
-            "query": query,
+            # `query_sent` is the string Scryfall actually received, after
+            # normalisation. It is present on EVERY response, not only when
+            # normalisation changed something: a zero-result is only interpretable
+            # next to the query that produced it.
+            "query": sent_query,
+            "query_sent": sent_query,
+            "query_received": query,
+            "query_was_escaped": was_escaped,
             "total_cards": result.total_cards,
             "page": page,
             "has_more": result.has_more,
@@ -148,12 +169,29 @@ async def card_details(
         raise ToolError(f"Scryfall API error: {exc}") from exc
 
     lines = format_card_detail(card, response_format=response_format)
+
+    # How often the ability fires, derived from the oracle text. "Whenever a Ninja you
+    # control deals combat damage" multiplies per attacker; "whenever one or more..."
+    # does not. Nothing in the card data distinguishes them, and reading them as the
+    # same thing changes a card's value outright.
+    trigger = derive_trigger(card)
     if response_format == "detailed":
         lines.append(f"Legalities: {format_legalities(card.legalities)}")
+        if trigger.scope != "static":
+            lines.append(f"Trigger scope: {trigger.scope} (condition: {trigger.condition})")
+            if trigger.notes:
+                lines.append(trigger.notes)
         lines.append(f"Scryfall: {card.scryfall_uri}")
+
     return ToolResult(
         content="\n".join(lines) + ATTRIBUTION_SCRYFALL,
-        structured_content=card.model_dump(mode="json"),
+        structured_content={
+            **card.model_dump(mode="json"),
+            "trigger_scope": trigger.scope,
+            "trigger_condition": trigger.condition,
+            "trigger_sources": trigger.sources,
+            "trigger_notes": trigger.notes,
+        },
     )
 
 
