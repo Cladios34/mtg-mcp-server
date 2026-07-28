@@ -51,10 +51,28 @@ class TestSpicerackLive:
     """Hit the real Spicerack API."""
 
     async def test_recent_tournaments(self, live_client):
+        """Spicerack answers, or it is unreachable — those are different verdicts.
+
+        The upstream service has gone fully dark before (site unreachable from two
+        networks, 2026-07-22). A red suite every time a third party is down trains
+        everyone to ignore it, and the one failure that matters gets ignored with it.
+
+        So an unreachable host SKIPS, while any other error still FAILS: a schema
+        drift or a broken wrapper does not produce a network error, and that is the
+        regression this test exists to catch.
+        """
         result = await live_client.call_tool(
-            "spicerack_recent_tournaments", {"format": "Legacy", "num_days": 30}
+            "spicerack_recent_tournaments",
+            {"format": "Legacy", "num_days": 30},
+            raise_on_error=False,
         )
         text = result.content[0].text
+
+        if result.is_error:
+            if "Network error" in text or "timed out" in text.lower():
+                pytest.skip(f"Spicerack unreachable, not our regression: {text}")
+            pytest.fail(f"Spicerack returned an error that is not a network fault: {text}")
+
         assert "Legacy" in text
 
 
