@@ -37,7 +37,9 @@ from mtg_mcp_server.services.scryfall_bulk import ScryfallBulkClient, ScryfallBu
 from mtg_mcp_server.utils.color_identity import is_within_identity, parse_color_identity
 from mtg_mcp_server.utils.format_rules import get_format_rules
 from mtg_mcp_server.utils.formatters import ResponseFormat, format_card_detail
+from mtg_mcp_server.utils.mechanics import has_creature_type
 from mtg_mcp_server.utils.query_parser import parse_query
+from mtg_mcp_server.utils.query_sanitize import looks_like_scryfall_syntax
 from mtg_mcp_server.utils.slim import slim_card
 
 # Lightweight format alias map — maps common abbreviations to Scryfall legality
@@ -206,6 +208,18 @@ async def card_search(
     """
     client = _get_client()
 
+    # This tool matches plain substrings. Handed a Scryfall filter expression it
+    # would match nothing, and a bare "No cards found" would then be read as proof
+    # the cards do not exist — so refuse loudly instead of returning an empty set.
+    if looks_like_scryfall_syntax(query):
+        raise ToolError(
+            f"'{query}' is Scryfall filter syntax, but this tool matches plain "
+            f"substrings in a single field — it cannot honour ':' or '<=' and would "
+            f"return an empty result that looks like absence. "
+            f"Use scryfall_search_cards for filter syntax, or pass a bare substring "
+            f"here (e.g. 'Ninja' with search_field='type')."
+        )
+
     try:
         if search_field == "name":
             results = await client.search_cards(query, limit=limit)
@@ -217,22 +231,41 @@ async def card_search(
         raise ToolError(f"Scryfall bulk data error: {exc}") from exc
 
     if not results:
-        raise ToolError(f"No cards found for {search_field} search: '{query}'.")
+        raise ToolError(
+            f"No cards found for {search_field} search: '{query}'. "
+            f"This is a substring match on the {search_field} field — zero matches "
+            f"here is not proof the cards do not exist. Try scryfall_search_cards "
+            f"with filter syntax before concluding anything."
+        )
 
     lines = [f"Found {len(results)} card(s) matching {search_field}='{query}':"]
     for card in results:
+        cost = f" {card.mana_cost}" if card.mana_cost else ""
         if response_format == "concise":
-            cost = f" {card.mana_cost}" if card.mana_cost else ""
             lines.append(f"  {card.name}{cost}")
         else:
-            cost = f" {card.mana_cost}" if card.mana_cost else ""
             lines.append(f"  {card.name}{cost} -- {card.type_line}")
+
+    # A type search says what it counted. A tribal count that quietly omits
+    # changelings is wrong by rule (702.73a), and the omission used to be invisible.
+    changelings: list[str] = []
+    if search_field == "type":
+        changelings = [
+            card.name for card in results if has_creature_type(card, query).via == "changeling"
+        ]
+        if changelings:
+            lines.append(
+                f"\nIncludes {len(changelings)} changeling(s) — every creature type by "
+                f"rule 702.73a, not by type line: {', '.join(changelings)}"
+            )
+
     return ToolResult(
         content="\n".join(lines) + ATTRIBUTION_SCRYFALL_BULK,
         structured_content={
             "query": query,
             "search_field": search_field,
             "total_results": len(results),
+            "changelings_included": changelings,
             "cards": [slim_card(card) for card in results],
         },
     )
