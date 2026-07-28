@@ -171,6 +171,7 @@ When reviewing PRs (automated CI or manual), verify these project-specific compl
 - **Spicerack** (Tournament Results): Complete — SpicerackClient service with get_tournaments() (TTLCache 4h). 3 tools (recent_tournaments, tournament_results, format_decklists), 1 resource template.
 - **MTGGoldfish** (Metagame Data): Complete — MTGGoldfishClient service with HTML scraping (selectolax). 4 tools (metagame, archetype_list, format_staples, deck_price), 1 resource template. 60 tools total.
 - **v2.3.0** (Metagame + Sideboard + Moxfield): Complete — 4 metagame workflow tools (metagame_snapshot, archetype_decklist, archetype_comparison, format_entry_guide), 3 sideboard workflow tools (suggest_sideboard, sideboard_guide, sideboard_matrix), 2 Moxfield provider tools (search_decks, user_decks), fuzzy matching utility. 69 tools, 19 prompts. 1336 tests, 88% coverage.
+- **Audit hardening** (2026-07-28): Complete — every tool response echoes `params_received` (`ParamsEchoMiddleware`); search zeroes state the query sent and that zero is not absence; `bulk_card_search` refuses Scryfall filter syntax; changelings included in bulk type search (702.73a); 2 new workflow tools (`deck_mechanic_map`, `cost_reduction_check`); rulings section of `deck_audit_bundle` ships the signature mechanic's carriers; declared categories measured in `deck_analysis` and `hand_probability`. 74 tools. Every item traces to a shipped error in the 2026-07-27 deck audit.
 
 ## Environment
 

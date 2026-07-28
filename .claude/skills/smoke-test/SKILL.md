@@ -143,7 +143,22 @@ If MTGGoldfish unavailable, metagame_snapshot should fall back to Spicerack data
 | `commander_comparison(commanders=["Muldrotha, the Gravetide", "Meren of Clan Nel Toth"])` | Both commanders compared, color identity shown |
 | `color_identity_staples(color_identity="sultai", category="creatures")` | Creature cards in BUG identity |
 
-### 16. Cross-Tool Consistency
+### 16. Mechanics & Instrumentation
+
+These check the guarantees added after the 2026-07-27 audit: a mechanic-indexed view,
+rules arithmetic that is computed rather than narrated, and responses that always say
+what the server received.
+
+| Call | Validate |
+|------|----------|
+| `deck_mechanic_map(decklist=[...ninjutsu cards...], commander="Yuriko, the Tiger's Shadow")` | `mechanics[0].count` matches the number of ninjutsu cards in the list, NOT 1. Changelings appear under `cards_by_changeling`, not missing |
+| `cost_reduction_check(reducer_card="Silver-Fur Master", target_costs=["{U}{B}", "{2}{U}{U}"])` | `{U}{B}` is NOT reduced (601.2f cited), `{2}{U}{U}` becomes `{1}{U}{U}` |
+| `bulk_card_search(query="Ninja", search_field="type")` | `changelings_included` is non-empty — a Ninja search that omits changelings is wrong by rule |
+| `scryfall_card_details(name="Yuriko, the Tiger's Shadow")` | `trigger_scope` is `per_source` (fires once per Ninja, not once per combat) |
+| Any tool call | Response carries `params_received` echoing exactly what was sent |
+| `scryfall_search_cards(query="t:creature id<=ub mv<=2 f:commander")` | Non-zero `total_cards`; `query_sent` shows the operators intact; `query_was_escaped` is false |
+
+### 17. Cross-Tool Consistency
 
 Compare results from step 1 (`scryfall_card_details("Sol Ring")`) and step 2 (`bulk_card_lookup("Sol Ring")`):
 - Names match
@@ -174,8 +189,9 @@ Compare results from step 1 (`scryfall_card_details("Sol Ring")`) and step 2 (`b
 | Metagame | 3 | | | |
 | Sideboard | 3 | | | |
 | Commander Depth | 2 | | | |
+| Mechanics & Instrumentation | 6 | | | |
 | Consistency | 1 | | | |
-| **Total** | **47** | | | |
+| **Total** | **53** | | | |
 
 ### Failures
 [Details for each FAIL — what was expected vs actual]

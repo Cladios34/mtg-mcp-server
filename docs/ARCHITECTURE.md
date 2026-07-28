@@ -178,12 +178,16 @@ mtg-mcp/
 │       ├── utils/                  # Shared utilities (no MCP awareness)
 │       │   ├── __init__.py
 │       │   ├── color_identity.py   # Color identity parsing and validation
+│       │   ├── declared.py         # Declared-category filters, measured against the actual list
 │       │   ├── decklist.py         # Decklist parsing (4x Card Name format)
 │       │   ├── format_rules.py     # Format-specific rules (deck sizes, copy limits)
 │       │   ├── formatters.py       # Shared formatting helpers (ResponseFormat, markdown)
 │       │   ├── mana.py             # Mana cost parsing utilities
+│       │   ├── mechanics.py        # Cost reduction (601.2f), keywords, creature types (702.73a)
 │       │   ├── fuzzy.py             # Fuzzy matching for archetype/matchup names
 │       │   ├── query_parser.py     # Search query parsing for bulk data
+│       │   ├── query_sanitize.py   # Decodes HTML-escaped search operators, reports the escaping
+│       │   ├── triggers.py         # Trigger scope from oracle text (per-source vs per-combat)
 │       │   └── slim.py             # Slim dict builders for structured_content response sizes
 │       │
 │       └── workflows/              # Composed tools (registered on orchestrator, no namespace)
@@ -202,6 +206,8 @@ mtg-mcp/
 │           ├── validation.py       # deck_validate
 │           ├── mana_base.py        # suggest_mana_base
 │           ├── pricing.py          # price_comparison
+│           ├── mechanic_map.py     # deck_mechanic_map — shared mechanics, tribal counts, trigger reach
+│           ├── cost_reduction.py   # cost_reduction_check — what a reducer actually reduces
 │           ├── rules.py            # rules_lookup, keyword_explain, rules_interaction, rules_scenario, combat_calculator
 │           └── card_resolver.py    # Bulk-data-first card resolution with Scryfall fallback
 │
@@ -724,6 +730,13 @@ mise run check    # Runs lint + typecheck + test — all must pass
 | Spicerack provider | Behind feature flag, `ns=spicerack` | Documented public REST API for tournament results. Lowest-risk new data source. Optional `X-API-Key` for higher rate limits |
 | MTGGoldfish provider | Behind feature flag, `ns=goldfish` | HTML scraping (no API) with selectolax. Browser-like UA required. Follows EDHREC fragile-source pattern: feature flag, TAGS_BETA, aggressive caching, ToolError on failure |
 | HTML parsing dependency | selectolax | 10-50x faster than BeautifulSoup, tiny footprint. Added for MTGGoldfish HTML scraping. Only used in `services/mtggoldfish.py` |
+| Parameter echo | `ParamsEchoMiddleware`, one global middleware | Every tool response carries `params_received`. An input mangled in transit used to be indistinguishable from a legitimately empty result — a client HTML-escaping its query survived ~40 calls unnoticed. A middleware covers all tools at once instead of per-tool plumbing |
+| Empty-result messaging | Zero matches always states what was sent | "No cards found" reads as proof of absence. Every zero now echoes the exact query sent and says that zero is not evidence the cards do not exist |
+| Substring vs filter syntax | `bulk_card_search` refuses Scryfall filter syntax | It matches plain substrings; handed `t:creature mv<=2` it would return an empty set that looks like absence. Refusing loudly beats returning nothing |
+| Changelings in type search | Included by default in `search_by_type` | Rule 702.73a makes a changeling every creature type, but its type line says "Shapeshifter". A literal type-line match silently undercounts every tribal deck. Opt out with `include_changelings=False` |
+| Mechanic-indexed analysis | `deck_mechanic_map` | All other tools are card-indexed, so card-by-card analysis is the only path they pave. A deck's shared mechanic, its cost modifiers' real reach, and its trigger scopes have no card-level representation |
+| Rules arithmetic | Computed, never narrated | Generic cost reduction (601.2f) and tribal counts (702.73a) are mechanical. Both were done by hand in a real audit and both came out wrong, one of them twice in opposite directions |
+| Declared categories | Measured against the list, drift reported | A count stated by the deck's owner is a constraint. `deck_analysis` and `hand_probability` measure it; `hand_probability` derives `copies` from the list rather than trusting the argument |
 
 ---
 
