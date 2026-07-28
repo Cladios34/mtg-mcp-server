@@ -168,6 +168,28 @@ class TestCardDetails:
         assert result.is_error
 
 
+class TestCardDetailsTriggerScope:
+    """Trigger scope travels with the card (2026-07-27).
+
+    Three cards in one deck read almost identically and behaved very differently:
+    "whenever a Ninja you control deals combat damage" fires once PER NINJA, while
+    "whenever one or more Ninja..." fires once per combat. Nothing in the card data
+    marked the difference, and reading them as equivalent misvalued all three.
+    """
+
+    @respx.mock
+    async def test_scope_is_reported(self, client: Client):
+        fixture = _load_fixture("card_muldrotha.json")
+        respx.get(f"{BASE_URL}/cards/named", params={"exact": "Muldrotha, the Gravetide"}).mock(
+            return_value=httpx.Response(200, json=fixture)
+        )
+        result = await client.call_tool("card_details", {"name": "Muldrotha, the Gravetide"})
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert "trigger_scope" in sc
+        assert "trigger_condition" in sc
+
+
 class TestCardDetailsConcise:
     """Scryfall card_details tool concise mode."""
 
