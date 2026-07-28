@@ -32,6 +32,28 @@ from pydantic import ValidationError
 
 from mtg_mcp_server.services.base import DEFAULT_USER_AGENT, ServiceError
 from mtg_mcp_server.types import Card
+from mtg_mcp_server.utils.mechanics import has_creature_type
+
+# Card types, as opposed to creature subtypes. A changeling is every creature type
+# (702.73a) but it is not an Artifact, so these never pick up changelings.
+_CARD_TYPES = frozenset(
+    {
+        "artifact",
+        "battle",
+        "creature",
+        "enchantment",
+        "instant",
+        "kindred",
+        "land",
+        "planeswalker",
+        "sorcery",
+        "tribal",
+        "legendary",
+        "basic",
+        "snow",
+        "token",
+    }
+)
 
 __all__ = ["ScryfallBulkClient", "ScryfallBulkDownloadError", "ScryfallBulkError"]
 
@@ -239,21 +261,44 @@ class ScryfallBulkClient:
                     break
         return results
 
-    async def search_by_type(self, type_query: str, limit: int = 20) -> list[Card]:
+    async def search_by_type(
+        self, type_query: str, limit: int = 20, *, include_changelings: bool = True
+    ) -> list[Card]:
         """Search cards by type line substring (case-insensitive).
+
+        Changelings are included by default. A changeling's type line says
+        "Shapeshifter", but rule 702.73a makes it every creature type in every zone,
+        so a plain type-line match silently drops it — which is exactly how a tribal
+        count comes out short (observed 2026-07-27: a Ninja search returned 62 cards
+        with both of the deck's changelings missing).
 
         Args:
             type_query: Substring to match against type lines.
             limit: Maximum results to return.
+            include_changelings: Also return changelings when ``type_query`` is a
+                creature subtype. Turned off, this reverts to a literal type-line
+                match — correct only when you want printed types specifically.
 
         Returns:
             Matching cards, up to ``limit``.
         """
         await self.ensure_loaded()
         query_lower = type_query.lower()
+        # Only subtypes get the changeling treatment: a changeling is every CREATURE
+        # type, not an Artifact or a Land.
+        changelings_apply = include_changelings and query_lower not in _CARD_TYPES
+
         results: list[Card] = []
         for card in self._unique_cards:
-            if query_lower in card.type_line.lower():
+            type_line = card.type_line.lower()
+            matched = query_lower in type_line
+            # The changeling fallback runs the full rules check, including a regex
+            # split of the oracle text. Gated on "creature" in the type line so a
+            # miss costs one substring test, not a parse: over ~30k cards the
+            # ungated version measured 138ms of blocking work against 5ms.
+            if not matched and changelings_apply and "creature" in type_line:
+                matched = has_creature_type(card, type_query).matches
+            if matched:
                 results.append(card)
                 if len(results) >= limit:
                     break

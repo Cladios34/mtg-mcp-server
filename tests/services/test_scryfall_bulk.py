@@ -349,10 +349,10 @@ class TestParsing:
     """Test that the bulk data is parsed correctly into Card models."""
 
     async def test_correct_card_count(self, loaded_client: ScryfallBulkClient):
-        """27 playable cards (4 non-playable layouts filtered), 28 dict entries for DFC."""
-        assert len(loaded_client._unique_cards) == 27
-        # 27 normal keys + 1 extra for DFC front-face-only key
-        assert len(loaded_client._cards) == 28
+        """29 playable cards (4 non-playable layouts filtered), 30 dict entries for DFC."""
+        assert len(loaded_client._unique_cards) == 29
+        # 29 normal keys + 1 extra for DFC front-face-only key
+        assert len(loaded_client._cards) == 30
 
     async def test_card_has_prices(self, loaded_client: ScryfallBulkClient):
         """Parsed cards have price data."""
@@ -570,6 +570,45 @@ class TestSearchByType:
         """Type search with no matching cards returns empty list."""
         results = await loaded_client.search_by_type("Planeswalker")
         assert results == []
+
+
+class TestChangelingsInTypeSearch:
+    """Rule 702.73a — a changeling is every creature type, in every zone.
+
+    Regression origin (2026-07-27): a Ninja type search returned 62 cards with both of
+    the deck's changelings missing. The cause was here, not upstream — the search
+    compared the type line, and a changeling's type line says "Shapeshifter".
+    A tribal deck is judged on that count.
+    """
+
+    async def test_changeling_is_returned_for_a_creature_subtype(
+        self, loaded_client: ScryfallBulkClient
+    ):
+        results = await loaded_client.search_by_type("Ninja")
+        names = [r.name for r in results]
+        assert "Ingenious Infiltrator" in names  # printed Ninja
+        assert "Changeling Outcast" in names  # Ninja by 702.73a
+
+    async def test_opting_out_gives_the_literal_type_line_match(
+        self, loaded_client: ScryfallBulkClient
+    ):
+        results = await loaded_client.search_by_type("Ninja", include_changelings=False)
+        names = [r.name for r in results]
+        assert "Ingenious Infiltrator" in names
+        assert "Changeling Outcast" not in names
+
+    async def test_changeling_is_not_returned_for_a_card_type(
+        self, loaded_client: ScryfallBulkClient
+    ):
+        # A changeling is every CREATURE type — it is not an Artifact.
+        results = await loaded_client.search_by_type("Artifact", limit=100)
+        assert "Changeling Outcast" not in [r.name for r in results]
+
+    async def test_changeling_still_matches_its_own_printed_type(
+        self, loaded_client: ScryfallBulkClient
+    ):
+        results = await loaded_client.search_by_type("Shapeshifter")
+        assert "Changeling Outcast" in [r.name for r in results]
 
 
 class TestSearchByText:
@@ -798,8 +837,8 @@ class TestParseFailures:
             client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=24)
             async with client:
                 await client.ensure_loaded()
-                # Fixture has 27 playable cards (non-playable layouts filtered)
-                assert len(client._unique_cards) == 27
+                # Fixture has 29 playable cards (non-playable layouts filtered)
+                assert len(client._unique_cards) == 29
                 assert await client.get_card("Sol Ring") is not None
 
     async def test_corrupt_data_on_refresh_serves_stale(self):

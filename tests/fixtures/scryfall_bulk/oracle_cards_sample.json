@@ -86,7 +86,7 @@
     "layout": "normal",
     "mana_cost": "{3}{B}{G}{U}",
     "cmc": 6.0,
-    "type_line": "Legendary Creature \u2014 Elemental Avatar",
+    "type_line": "Legendary Creature — Elemental Avatar",
     "oracle_text": "During each of your turns, you may play a land and cast a permanent spell of each permanent type from your graveyard. (If a card has multiple permanent types, choose one as you play it.)",
     "colors": [
       "B",
@@ -133,7 +133,7 @@
     "layout": "transform",
     "mana_cost": "{U}",
     "cmc": 1.0,
-    "type_line": "Creature \u2014 Human Wizard // Creature \u2014 Human Insect",
+    "type_line": "Creature — Human Wizard // Creature — Human Insect",
     "oracle_text": "At the beginning of your upkeep, look at the top card of your library. You may reveal that card. If an instant or sorcery card is revealed this way, transform Delver of Secrets.",
     "colors": [
       "U"
@@ -154,7 +154,7 @@
         "object": "card_face",
         "name": "Delver of Secrets",
         "mana_cost": "{U}",
-        "type_line": "Creature \u2014 Human Wizard",
+        "type_line": "Creature — Human Wizard",
         "oracle_text": "At the beginning of your upkeep, look at the top card of your library. You may reveal that card. If an instant or sorcery card is revealed this way, transform Delver of Secrets.",
         "colors": [
           "U"
@@ -166,7 +166,7 @@
         "object": "card_face",
         "name": "Insectile Aberration",
         "mana_cost": "",
-        "type_line": "Creature \u2014 Human Insect",
+        "type_line": "Creature — Human Insect",
         "oracle_text": "Flying",
         "colors": [
           "U"
@@ -199,7 +199,7 @@
     "lang": "en",
     "layout": "normal",
     "cmc": 0.0,
-    "type_line": "Basic Land \u2014 Forest",
+    "type_line": "Basic Land — Forest",
     "oracle_text": "({T}: Add {G}.)",
     "colors": [],
     "color_identity": [
@@ -232,13 +232,13 @@
     "object": "card",
     "id": "bbbb2222-3333-4444-5555-666677778888",
     "oracle_id": "cccc2222-3333-4444-5555-666677778888",
-    "name": "J\u00f6tun Grunt",
+    "name": "Jötun Grunt",
     "lang": "en",
     "layout": "normal",
     "mana_cost": "{1}{W}",
     "cmc": 2.0,
-    "type_line": "Creature \u2014 Giant Soldier",
-    "oracle_text": "Cumulative upkeep\u2014Put two cards from a single graveyard on the bottom of their owner's library. (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)",
+    "type_line": "Creature — Giant Soldier",
+    "oracle_text": "Cumulative upkeep—Put two cards from a single graveyard on the bottom of their owner's library. (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)",
     "colors": [
       "W"
     ],
@@ -323,7 +323,7 @@
     "layout": "normal",
     "mana_cost": "{G}",
     "cmc": 1.0,
-    "type_line": "Creature \u2014 Frog",
+    "type_line": "Creature — Frog",
     "oracle_text": "Sacrifice Spore Frog: Prevent all combat damage that would be dealt this turn.",
     "colors": [
       "G"
@@ -442,7 +442,7 @@
     "lang": "en",
     "layout": "token",
     "cmc": 0.0,
-    "type_line": "Token Creature \u2014 Treefolk",
+    "type_line": "Token Creature — Treefolk",
     "oracle_text": "",
     "colors": [
       "G"
@@ -478,7 +478,7 @@
     "lang": "en",
     "layout": "emblem",
     "cmc": 0.0,
-    "type_line": "Emblem \u2014 Jace",
+    "type_line": "Emblem — Jace",
     "oracle_text": "Whenever you cast a spell, you may copy it. You may choose new targets for the copy.",
     "colors": [],
     "color_identity": [
@@ -684,7 +684,7 @@
     "name": "Plains",
     "mana_cost": "",
     "cmc": 0.0,
-    "type_line": "Basic Land \u2014 Plains",
+    "type_line": "Basic Land — Plains",
     "oracle_text": "({T}: Add {W}.)",
     "colors": [],
     "color_identity": [
@@ -742,7 +742,7 @@
     "name": "Island",
     "mana_cost": "",
     "cmc": 0.0,
-    "type_line": "Basic Land \u2014 Island",
+    "type_line": "Basic Land — Island",
     "oracle_text": "({T}: Add {U}.)",
     "colors": [],
     "color_identity": [
@@ -800,7 +800,7 @@
     "name": "Swamp",
     "mana_cost": "",
     "cmc": 0.0,
-    "type_line": "Basic Land \u2014 Swamp",
+    "type_line": "Basic Land — Swamp",
     "oracle_text": "({T}: Add {B}.)",
     "colors": [],
     "color_identity": [
@@ -858,7 +858,7 @@
     "name": "Mountain",
     "mana_cost": "",
     "cmc": 0.0,
-    "type_line": "Basic Land \u2014 Mountain",
+    "type_line": "Basic Land — Mountain",
     "oracle_text": "({T}: Add {R}.)",
     "colors": [],
     "color_identity": [
@@ -977,7 +977,7 @@
     "name": "Llanowar Elves",
     "mana_cost": "{G}",
     "cmc": 1.0,
-    "type_line": "Creature \u2014 Elf Druid",
+    "type_line": "Creature — Elf Druid",
     "oracle_text": "{T}: Add {G}.",
     "colors": [
       "G"
@@ -1101,7 +1101,7 @@
     "name": "Tarmogoyf",
     "mana_cost": "{1}{G}",
     "cmc": 2.0,
-    "type_line": "Creature \u2014 Lhurgoyf",
+    "type_line": "Creature — Lhurgoyf",
     "oracle_text": "Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.",
     "colors": [
       "G"
@@ -1221,7 +1221,7 @@
     "name": "Kitchen Finks",
     "mana_cost": "{1}{G/W}{G/W}",
     "cmc": 3.0,
-    "type_line": "Creature \u2014 Ouphe",
+    "type_line": "Creature — Ouphe",
     "oracle_text": "When this creature enters, you gain 2 life.\nPersist (When this creature dies, if it had no -1/-1 counters on it, return it to the battlefield under its owner's control with a -1/-1 counter on it.)",
     "colors": [
       "G",
@@ -1288,7 +1288,7 @@
     "name": "Breeding Pool",
     "mana_cost": "",
     "cmc": 0.0,
-    "type_line": "Land \u2014 Forest Island",
+    "type_line": "Land — Forest Island",
     "oracle_text": "({T}: Add {G} or {U}.)\nAs this land enters, you may pay 2 life. If you don't, it enters tapped.",
     "colors": [],
     "color_identity": [
@@ -1588,7 +1588,7 @@
     "name": "Korvold, Fae-Cursed King",
     "mana_cost": "{2}{B}{R}{G}",
     "cmc": 5.0,
-    "type_line": "Legendary Creature \u2014 Dragon Noble",
+    "type_line": "Legendary Creature — Dragon Noble",
     "oracle_text": "Flying\nWhenever Korvold enters or attacks, sacrifice another permanent.\nWhenever you sacrifice a permanent, put a +1/+1 counter on Korvold and draw a card.",
     "colors": [
       "B",
@@ -1651,5 +1651,98 @@
     "set": "eoc",
     "collector_number": "120",
     "rulings_uri": "https://api.scryfall.com/cards/607c1793-8e5a-4ebf-87c6-7f9c99bbd29a/rulings"
+  },
+  {
+    "object": "card",
+    "id": "0f8bd9e1-4a1e-4d5c-bd35-1f5d7cbb1d11",
+    "oracle_id": "5d5b3e29-3d67-4d51-9a63-6b1d2a7e1a01",
+    "name": "Changeling Outcast",
+    "lang": "en",
+    "layout": "normal",
+    "mana_cost": "{B}",
+    "cmc": 1.0,
+    "type_line": "Creature — Shapeshifter",
+    "oracle_text": "Changeling (This card is every creature type.)\nChangeling Outcast can't block and can't be blocked.",
+    "colors": [
+      "B"
+    ],
+    "color_identity": [
+      "B"
+    ],
+    "keywords": [
+      "Changeling"
+    ],
+    "power": "1",
+    "toughness": "1",
+    "set": "mh1",
+    "collector_number": "84",
+    "rarity": "common",
+    "prices": {
+      "usd": "0.25",
+      "usd_foil": "1.10",
+      "eur": "0.20"
+    },
+    "legalities": {
+      "standard": "not_legal",
+      "commander": "legal",
+      "modern": "legal",
+      "legacy": "legal",
+      "vintage": "legal"
+    },
+    "image_uris": {
+      "normal": "https://cards.scryfall.io/normal/front/0/f/0f8bd9e1.jpg",
+      "art_crop": "https://cards.scryfall.io/art_crop/front/0/f/0f8bd9e1.jpg"
+    },
+    "scryfall_uri": "https://scryfall.com/card/mh1/84/changeling-outcast",
+    "edhrec_rank": 900,
+    "rulings_uri": "https://api.scryfall.com/cards/0f8bd9e1/rulings"
+  },
+  {
+    "object": "card",
+    "id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+    "oracle_id": "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e",
+    "name": "Ingenious Infiltrator",
+    "lang": "en",
+    "layout": "normal",
+    "mana_cost": "{2}{U}{B}",
+    "cmc": 4.0,
+    "type_line": "Creature — Faerie Ninja",
+    "oracle_text": "Flying\nNinjutsu {1}{U}{B}\nWhenever a Ninja you control deals combat damage to a player, draw a card.",
+    "colors": [
+      "B",
+      "U"
+    ],
+    "color_identity": [
+      "B",
+      "U"
+    ],
+    "keywords": [
+      "Flying",
+      "Ninjutsu"
+    ],
+    "power": "2",
+    "toughness": "3",
+    "set": "neo",
+    "collector_number": "217",
+    "rarity": "uncommon",
+    "prices": {
+      "usd": "0.40",
+      "usd_foil": "1.00",
+      "eur": "0.35"
+    },
+    "legalities": {
+      "standard": "not_legal",
+      "commander": "legal",
+      "modern": "legal",
+      "legacy": "legal",
+      "vintage": "legal"
+    },
+    "image_uris": {
+      "normal": "https://cards.scryfall.io/normal/front/1/a/1a2b3c4d.jpg",
+      "art_crop": "https://cards.scryfall.io/art_crop/front/1/a/1a2b3c4d.jpg"
+    },
+    "scryfall_uri": "https://scryfall.com/card/neo/217/ingenious-infiltrator",
+    "edhrec_rank": 1500,
+    "rulings_uri": "https://api.scryfall.com/cards/1a2b3c4d/rulings"
   }
 ]
