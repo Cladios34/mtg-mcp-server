@@ -47,6 +47,13 @@ _MULTI_SOURCE = re.compile(
 
 _SELF_SOURCE = re.compile(r"\bwhenever\s+(?:this|~|it)\b", re.I)
 
+# Same class-of-sources idea as _MULTI_SOURCE, but entry triggers use "when" as often
+# as "whenever", so the combat regex misses them.
+_ENTRY_MULTI = re.compile(
+    r"\b(?:when|whenever)\s+(?:a|an|another|each|one)\b(?!\s+or\s+more)",
+    re.I,
+)
+
 _ATTACKS = re.compile(r"\battacks?\b", re.I)
 _PER_OPPONENT = re.compile(r"\beach opponent\b", re.I)
 _PER_TURN = re.compile(r"at the beginning of|at end of", re.I)
@@ -121,6 +128,14 @@ def _derive_one(clause: str) -> Trigger | None:
                 sources="self",
                 notes=notes,
             )
+        # An entry trigger naming a CLASS of permanents fires once per permanent that
+        # enters. Impact Tremors doubles with every token; ranking it `on_entry` — the
+        # second-narrowest scope — dropped it out of the trigger-reach section
+        # entirely, which is the exact blindness this module exists to remove.
+        if _BATCHED.search(clause):
+            return Trigger(scope="per_combat", condition="enters", notes=notes)
+        if _ENTRY_MULTI.search(clause):
+            return Trigger(scope="per_source", condition="enters", sources="class", notes=notes)
         return Trigger(scope="on_entry", condition="enters", notes=notes)
     if _PER_TURN.search(clause):
         return Trigger(scope="per_turn", condition=condition or "phase_step", notes=notes)

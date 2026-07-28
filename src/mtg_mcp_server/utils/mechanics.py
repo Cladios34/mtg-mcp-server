@@ -72,6 +72,10 @@ _SYMBOL_RE = re.compile(r"\{([^}]+)\}")
 # so no single number describes it honestly.
 _VARIABLE_REDUCTION = re.compile(r"less to (?:cast|activate|play)[^.]*\bfor each\b", re.IGNORECASE)
 
+_REDUCTION_AMOUNT = re.compile(r"\{(\d)\}\s+less", re.IGNORECASE)
+
+_CHOSEN_TYPE = re.compile(r"\bthe chosen (?:creature )?type\b", re.IGNORECASE)
+
 # Scryfall type lines use an em dash. The double hyphen is the ASCII form that
 # shows up in hand-typed lists.
 _TYPE_SEPARATORS = ("—", "--")
@@ -212,6 +216,36 @@ def carries_keyword(card: Card, keyword: str) -> bool:
     return keyword_activation_cost(card, wanted) is not None
 
 
+def reduction_clause(card: Card) -> str | None:
+    """The sentence that carries the cost reduction, verbatim.
+
+    A reducer's amount is only half the story: "Spells you cast of the chosen type
+    cost {1} less" reduces nothing at all if the chosen type is not the deck's. This
+    module cannot resolve a choice made at resolution time, so it hands back the
+    clause and lets the reader judge the scope instead of asserting one.
+    """
+    for sentence in re.split(r"(?<=[.!])\s+|\n", card.oracle_text or ""):
+        if any(phrase in sentence.lower() for phrase in _REDUCTION_PHRASES):
+            return sentence.strip()
+    return None
+
+
+def reduction_depends_on_choice(card: Card) -> bool:
+    """Whether the reduction's scope is decided by a choice, not by the card text."""
+    return bool(_CHOSEN_TYPE.search(reduction_clause(card) or ""))
+
+
+def has_reduction_clause(card: Card) -> bool:
+    """Whether the oracle reduces costs at all, however unquotable the amount.
+
+    ``reduction_amount`` returns None both for "no clause" and for a clause it refuses
+    to put a number on. Callers that report the difference to a human need to tell the
+    two apart: "it does not reduce costs" is a very different sentence from "it does,
+    by an amount that depends on the board".
+    """
+    return any(phrase in (card.oracle_text or "").lower() for phrase in _REDUCTION_PHRASES)
+
+
 def reduction_amount(card: Card) -> int | None:
     """How much generic mana this card shaves off costs, or None if it shaves none.
 
@@ -226,9 +260,15 @@ def reduction_amount(card: Card) -> int | None:
         return None
     if _VARIABLE_REDUCTION.search(oracle):
         return None
-    for amount in range(9, 0, -1):
-        if f"{{{amount}}} less" in oracle:
-            return amount
+    amounts = {int(found) for found in _REDUCTION_AMOUNT.findall(oracle)}
+    if len(amounts) > 1:
+        # Two different reductions in one oracle ("{2} less to cast", "{1} less to
+        # activate"). Returning the larger is a precise, plausible, wrong number for
+        # whichever cost the caller meant — the same failure this function already
+        # refuses for variable reductions, so it gets the same answer.
+        return None
+    if amounts:
+        return amounts.pop()
     return 1
 
 

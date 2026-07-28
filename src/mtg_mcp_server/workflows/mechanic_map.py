@@ -36,6 +36,8 @@ from mtg_mcp_server.utils.mechanics import (
     keyword_activation_cost,
     parse_mana_cost,
     reduction_amount,
+    reduction_clause,
+    reduction_depends_on_choice,
 )
 from mtg_mcp_server.utils.triggers import derive_trigger
 from mtg_mcp_server.workflows import WorkflowResult
@@ -118,6 +120,12 @@ def _mechanic_entry(
                 "carriers_total": len(carriers),
                 "affected": affected,
                 "unaffected": unaffected,
+                # The counts above answer "would this amount fit these costs", NOT
+                # "does this card's clause target these cards". Herald's Horn reduces
+                # only the chosen type; asserting a scope we cannot resolve would be
+                # the same confident-and-wrong number this tool exists to replace.
+                "clause": reduction_clause(card),
+                "depends_on_choice": reduction_depends_on_choice(card),
                 "note": _GENERIC_ONLY_NOTE,
             }
         )
@@ -253,6 +261,11 @@ async def deck_mechanic_map(
                 "scope": trigger.scope,
                 "condition": trigger.condition,
                 "sources": trigger.sources,
+                # A card with two abilities is reported by its widest-reaching one.
+                # Without this field the second one is computed and then dropped on
+                # the floor — the reader sees a per_source card and never learns it
+                # also has an upkeep trigger.
+                "other_scopes": list(trigger.other_scopes),
                 "notes": trigger.notes,
             }
         )
@@ -317,9 +330,17 @@ def _format(
 
         for modifier in mechanic["cost_modifiers"]:
             lines.append(
-                f"**{modifier['name']}** reduces {modifier['reduces']} of "
-                f"{modifier['of']} — not all of them. {_GENERIC_ONLY_NOTE}"
+                f"**{modifier['name']}**: the amount fits {modifier['reduces']} of "
+                f"{modifier['of']} costs here, not all of them. {_GENERIC_ONLY_NOTE}"
             )
+            if modifier["clause"]:
+                lines.append(f"Clause: _{modifier['clause']}_")
+            if modifier["depends_on_choice"]:
+                lines.append(
+                    "Its scope is set by a type chosen on resolution, so whether it "
+                    "touches these cards at all depends on that choice, not on the "
+                    "count above."
+                )
             if modifier["unaffected"]:
                 lines.append(f"Unaffected: {', '.join(modifier['unaffected'])}")
             lines.append("")

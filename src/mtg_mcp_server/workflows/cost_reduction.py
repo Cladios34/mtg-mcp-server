@@ -17,6 +17,7 @@ import structlog
 
 from mtg_mcp_server.utils.mechanics import (
     apply_generic_reduction,
+    has_reduction_clause,
     keyword_activation_cost,
     reduction_amount,
 )
@@ -69,19 +70,37 @@ async def cost_reduction_check(
     amount = reduction_amount(reducer)
 
     if amount is None:
+        # `reduction_amount` returns None both for "no clause" and for a clause whose
+        # amount it refuses to quote (variable, or two different amounts in one
+        # oracle). Reporting the second as "does not reduce costs" is a flat lie about
+        # a card that does reduce them, and it is the kind of lie a reader acts on.
+        unquotable = has_reduction_clause(reducer)
+        headline = (
+            f"**{reducer.name} reduces costs by an amount this tool will not quote.** "
+            "The clause is variable or carries more than one amount, so any single "
+            "number here would be precise and wrong. Read the oracle and count for "
+            "the board state you actually care about."
+            if unquotable
+            else f"**{reducer.name} does not reduce costs.** Its oracle text carries no "
+            "cost-reduction clause, so nothing below would change."
+        )
         return WorkflowResult(
             markdown=(
-                f"# Cost reduction — {reducer.name}\n\n"
-                f"**{reducer.name} does not reduce costs.** Its oracle text carries no "
-                f"cost-reduction clause, so nothing below would change.\n\n"
+                f"# Cost reduction — {reducer.name}\n\n{headline}\n\n"
                 f"Oracle: {reducer.oracle_text or '(none)'}"
             ),
             data={
                 "reducer": reducer.name,
-                "reduces": False,
-                "amount": 0,
+                "reduces": unquotable,
+                "amount": None,
+                "amount_unquotable": unquotable,
                 "targets": [],
-                "note": "no cost-reduction clause found in the oracle text",
+                "note": (
+                    "cost-reduction clause present but its amount is variable or "
+                    "ambiguous — no fixed number can be quoted"
+                    if unquotable
+                    else "no cost-reduction clause found in the oracle text"
+                ),
             },
         )
 

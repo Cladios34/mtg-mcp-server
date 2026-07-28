@@ -298,3 +298,91 @@ class TestUnresolved:
             [*DECK, "Not A Real Card"], YURIKO.name, bulk=bulk, scryfall=scryfall
         )
         assert "Not A Real Card" in result.data["unresolved"]
+
+    async def test_second_ability_is_reported_not_dropped(self, bulk, scryfall) -> None:
+        """A card with two triggers reports the widest AND names the others.
+
+        Adversarial review (2026-07-28) caught the field being computed and then
+        left out of the payload: the reader saw a per_source card and never learned
+        it also had an upkeep trigger.
+        """
+        two_abilities = _card(
+            "Two Ability Ninja",
+            oracle=(
+                "Ninjutsu {1}{U}\n"
+                "At the beginning of your upkeep, draw a card.\n"
+                "Whenever a Ninja you control deals combat damage to a player, draw."
+            ),
+        )
+        by_name = {c.name.lower(): c for c in [*_ALL, two_abilities]}
+        bulk.get_card.side_effect = lambda name: by_name.get(name.lower())
+
+        result = await deck_mechanic_map(
+            [*DECK, two_abilities.name], YURIKO.name, bulk=bulk, scryfall=scryfall
+        )
+        entry = next(t for t in result.data["triggers"] if t["name"] == two_abilities.name)
+        assert entry["scope"] == "per_source"
+        assert "per_turn" in entry["other_scopes"]
+
+    async def test_entry_trigger_naming_a_class_multiplies(self, bulk, scryfall) -> None:
+        """Impact Tremors fires per creature, so it must not rank as a one-shot ETB.
+
+        Adversarial review (2026-07-28): the entry branch matched before the
+        multi-source branch, so every ETB payoff came back `on_entry` and dropped out
+        of the trigger-reach section entirely — the one blindness this tool exists to
+        remove.
+        """
+        tremors = _card(
+            "Impact Tremors",
+            oracle=(
+                "Whenever a creature enters the battlefield under your control, "
+                "Impact Tremors deals 1 damage to each opponent."
+            ),
+            type_line="Enchantment",
+        )
+        one_shot = _card(
+            "Solitary Ninja",
+            oracle="When this creature enters, draw a card.",
+        )
+        by_name = {c.name.lower(): c for c in [*_ALL, tremors, one_shot]}
+        bulk.get_card.side_effect = lambda name: by_name.get(name.lower())
+
+        result = await deck_mechanic_map(
+            [*DECK, tremors.name, one_shot.name], YURIKO.name, bulk=bulk, scryfall=scryfall
+        )
+        triggers = {t["name"]: t for t in result.data["triggers"]}
+        assert triggers[tremors.name]["scope"] == "per_source"
+        assert triggers[tremors.name]["sources"] == "class"
+        # The one-shot must NOT be swept up by the same widening.
+        assert triggers[one_shot.name]["scope"] == "on_entry"
+
+    async def test_reducer_scope_is_shown_not_asserted(self, bulk, scryfall) -> None:
+        """A reduction whose scope is a chosen type cannot be credited to a mechanic.
+
+        Adversarial review (2026-07-28): the count answered "does the amount fit
+        these costs", and the markdown read it as "this card reduces them".
+        """
+        horn = _card(
+            "Herald's Horn",
+            oracle=(
+                "As Herald's Horn enters, choose a creature type.\n"
+                "Spells you cast of the chosen type cost {1} less to cast."
+            ),
+            type_line="Artifact",
+        )
+        by_name = {c.name.lower(): c for c in [*_ALL, horn]}
+        bulk.get_card.side_effect = lambda name: by_name.get(name.lower())
+
+        result = await deck_mechanic_map(
+            [*DECK, horn.name], YURIKO.name, bulk=bulk, scryfall=scryfall
+        )
+        modifiers = [
+            m
+            for mech in result.data["mechanics"]
+            for m in mech["cost_modifiers"]
+            if m["name"] == horn.name
+        ]
+        assert modifiers, "the reducer should still be surfaced"
+        assert modifiers[0]["depends_on_choice"] is True
+        assert "chosen type" in modifiers[0]["clause"]
+        assert "depends on that choice" in result.markdown

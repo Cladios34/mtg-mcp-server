@@ -19,6 +19,7 @@ from mtg_mcp_server.utils.mechanics import (
     apply_generic_reduction,
     creature_types,
     has_creature_type,
+    has_reduction_clause,
     keyword_activation_cost,
     parse_mana_cost,
     reduction_amount,
@@ -276,3 +277,36 @@ class TestKeywordPatternCacheIsBounded:
     def test_basic_prefix_variant_is_matched(self) -> None:
         card = _card(oracle_text="Basic landcycling {1}", type_line="Land")
         assert keyword_activation_cost(card, "Landcycling") == "{1}"
+
+
+class TestAmbiguousReduction:
+    """Two different amounts in one oracle produce no quotable number."""
+
+    def test_two_distinct_amounts_refuse_to_quote(self) -> None:
+        """Adversarial review (2026-07-28): the scan returned the LARGEST {N} less
+        found anywhere in the oracle, so a card reducing casts by {2} and activations
+        by {1} reported 2 for both."""
+        card = _card(
+            name="Split Reducer",
+            oracle_text=(
+                "Ninja spells you cast cost {2} less to cast.\n"
+                "Ninjutsu abilities you activate cost {1} less to activate."
+            ),
+        )
+        assert reduction_amount(card) is None
+        assert has_reduction_clause(card) is True
+
+    def test_same_amount_twice_still_quotes_it(self) -> None:
+        card = _card(
+            name="Consistent Reducer",
+            oracle_text=(
+                "Ninja spells you cast cost {1} less to cast.\n"
+                "Ninjutsu abilities you activate cost {1} less to activate."
+            ),
+        )
+        assert reduction_amount(card) == 1
+
+    def test_no_clause_is_not_an_unquotable_clause(self) -> None:
+        card = _card(name="Plain Bear", oracle_text="Trample")
+        assert reduction_amount(card) is None
+        assert has_reduction_clause(card) is False
