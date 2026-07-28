@@ -21,6 +21,7 @@ from mcp.types import Icon, ToolAnnotations
 from mtg_mcp_server import __version__
 from mtg_mcp_server.config import Settings
 from mtg_mcp_server.logging import configure_logging
+from mtg_mcp_server.middleware import ParamsEchoMiddleware
 from mtg_mcp_server.providers.edhrec import edhrec_mcp
 from mtg_mcp_server.providers.moxfield import moxfield_mcp
 from mtg_mcp_server.providers.mtggoldfish import mtggoldfish_mcp
@@ -61,6 +62,9 @@ mcp = FastMCP(
         "- card_comparison: Side-by-side comparison of 2-5 cards\n"
         "- budget_upgrade: Price-constrained upgrade suggestions\n"
         "- deck_analysis: Full decklist health check\n"
+        "- deck_mechanic_map: Mechanics a deck SHARES — keyword carriers, tribal counts "
+        "(changelings included), trigger reach. Run before describing how a deck works\n"
+        "- cost_reduction_check: What a cost reducer actually reduces, and what it does not\n"
         "- set_overview: Draft format card ratings overview and trap rares\n"
         "- draft_pack_pick: Rank cards in a draft pack\n"
         "- suggest_cuts: Identify weakest cards to cut\n"
@@ -125,6 +129,15 @@ if _settings.enable_mtggoldfish:
 
 # Workflow tools mounted without namespace for clean names.
 mcp.mount(workflow_mcp)
+
+# Every tool response echoes the arguments the server received. Registered FIRST so
+# it is the OUTERMOST middleware and its echo is applied AFTER the size limiters below.
+# Order matters: truncation replaces the result with a plain text block and drops
+# structured_content, so an echo added underneath would vanish on exactly the large
+# responses that are hardest to debug. Because this places the echo OUTSIDE the size
+# ceiling, the middleware summarises long list and string arguments itself rather than
+# repeating a 99-card decklist verbatim. Rationale in mtg_mcp_server.middleware.
+mcp.add_middleware(ParamsEchoMiddleware())
 
 # Per-tool limits for known heavy tools — tighter than the global ceiling.
 # These are safety nets; slim field sets and limit params in the tools themselves
