@@ -22,6 +22,7 @@ __all__ = ["RulesDownloadError", "RulesError", "RulesService"]
 
 log = structlog.get_logger(service="rules")
 
+
 # A rules search is a keyword or a short phrase; 200 is far past any real one.
 #
 # GOTCHA(2026-07-29): the search term is compiled into a regex, and the term comes

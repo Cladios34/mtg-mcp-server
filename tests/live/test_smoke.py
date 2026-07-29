@@ -360,3 +360,38 @@ class TestCrossFormatLive:
         text = result.content[0].text
         assert "Lightning Bolt" in text
         assert "modern" in text.lower()
+
+
+@pytest.mark.live
+async def test_scenario_ranking_on_the_real_corpus():
+    """Scenario ranking measured against all 3047 rules, not a 26-rule fixture.
+
+    The fixture cannot show this defect: ranking is about which rules come back
+    FIRST out of many, and 26 rules produce no competition. Measured here on the
+    real corpus, where the same scenario once put the two governing rules at
+    ranks 105 and 114 of 368 inside a 215 KB response.
+
+    This is a floor, not a target. Cases whose wording names a mechanic
+    ("deathtouch", "trample") rank well; cases phrased in plain language without
+    a glossary term still fail, which is the known limit of lexical retrieval
+    and the reason a larger annotated question set comes before any further
+    tuning.
+    """
+    from mtg_mcp_server.config import Settings
+    from mtg_mcp_server.services.rules import RulesService
+    from mtg_mcp_server.workflows.rules import rules_scenario
+
+    service = RulesService(rules_url=Settings().rules_url, refresh_hours=168)
+    await service.ensure_loaded()
+
+    result = await rules_scenario(
+        "My creature has deathtouch and trample. It is blocked by a 5/5 "
+        "creature. How much damage must I assign to the blocker?",
+        rules=service,
+    )
+    ranked = [r["number"] for r in result.data["rules"]]
+
+    # 702.19b is the rule that answers the question.
+    assert "702.19b" in ranked[:5], f"702.19b should rank top-5, got {ranked[:8]}"
+    # A verification aid has to be readable; 215 KB is a haystack.
+    assert len(result.markdown) < 20_000, f"{len(result.markdown)} chars"

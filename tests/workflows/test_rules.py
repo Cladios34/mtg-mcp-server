@@ -6,8 +6,10 @@ AsyncMock -- no respx/httpx needed.
 
 from __future__ import annotations
 
+import pathlib
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from mtg_mcp_server.services.rules import DEFAULT_SEARCH_LIMIT
@@ -109,6 +111,28 @@ def _make_card(
 # ---------------------------------------------------------------------------
 # rules_lookup
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def rules_service():
+    """A RulesService holding the real fixture corpus, not a mock.
+
+    Ranking cannot be tested against AsyncMock: the whole question is which
+    rules come back first out of many, so the corpus has to be real.
+    """
+    import respx
+
+    from mtg_mcp_server.services.rules import RulesService
+
+    fixture_path = (
+        pathlib.Path(__file__).parent.parent / "fixtures" / "rules" / "comprehensive_rules.txt"
+    )
+    url = "https://media.wizards.com/2025/downloads/MagicCompRules%2020250404.txt"
+    with respx.mock:
+        respx.get(url).mock(return_value=httpx.Response(200, content=fixture_path.read_bytes()))
+        service = RulesService(rules_url=url, refresh_hours=168)
+        await service.ensure_loaded()
+        yield service
 
 
 class TestRulesLookup:
@@ -690,3 +714,53 @@ class TestCombatCalculator:
 
         assert isinstance(result, WorkflowResult)
         assert "unblocked" in result.markdown.lower() or "no blockers" in result.markdown.lower()
+
+
+class TestScenarioRanking:
+    """A scenario must surface the rules that govern it, near the top.
+
+    Origin (2026-07-29): measured against production on "deathtouch and trample,
+    blocked by a 5/5, how much damage must I assign". The two rules that answer
+    it, 702.2b and 702.19b, came back at ranks 26 and 38 of 164, inside a 77 KB
+    response whose first eight entries were about APNAP order and mana
+    restrictions. The rules were retrieved; they were just buried.
+
+    The cause is that every word of the scenario is searched separately and the
+    results concatenated in word order. "creature" matches 567 of the 3047 real
+    rules and contributes all of them. Nothing ranked anything.
+    """
+
+    async def test_the_governing_rules_rank_first(self, rules_service):
+        result = await rules_scenario(
+            "My creature has deathtouch and trample. It is blocked by a 5/5 "
+            "creature. How much damage must I assign to the blocker?",
+            rules=rules_service,
+        )
+        ranked = [r["number"] for r in result.data["rules"]]
+        top5 = ranked[:5]
+        # 702.19b is the rule that actually answers the question.
+        assert "702.19b" in top5, f"702.19b should rank top-5, got {ranked[:8]}"
+        assert "702.2b" in top5, f"702.2b should rank top-5, got {ranked[:8]}"
+
+    async def test_a_term_matching_everything_does_not_dominate(self, rules_service):
+        """ "creature" matches hundreds of rules and discriminates nothing.
+
+        A scenario naming a specific keyword must not be drowned by the generic
+        noun sitting next to it.
+        """
+        result = await rules_scenario(
+            "Does my creature with deathtouch destroy the creature blocking it?",
+            rules=rules_service,
+        )
+        ranked = [r["number"] for r in result.data["rules"]]
+        assert ranked, "expected some rules"
+        # The deathtouch rules must outrank whatever "creature" alone dragged in.
+        assert any(n.startswith("702.2") for n in ranked[:3]), f"got {ranked[:5]}"
+
+    async def test_response_stays_small_enough_to_read(self, rules_service):
+        """77 KB of rules is not a verification aid, it is a haystack."""
+        result = await rules_scenario(
+            "My creature has deathtouch and trample and is blocked.",
+            rules=rules_service,
+        )
+        assert len(result.markdown) < 15_000, f"{len(result.markdown)} chars is too much"
