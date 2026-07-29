@@ -42,7 +42,7 @@ from mtg_mcp_server.services.base import ServiceError
 from mtg_mcp_server.services.edhrec import CommanderNotFoundError, EDHRECClient
 from mtg_mcp_server.services.moxfield import MoxfieldClient
 from mtg_mcp_server.services.mtggoldfish import MTGGoldfishClient
-from mtg_mcp_server.services.rules import RulesService
+from mtg_mcp_server.services.rules import DEFAULT_SEARCH_LIMIT, RulesService
 from mtg_mcp_server.services.scryfall import CardNotFoundError, ScryfallClient
 from mtg_mcp_server.services.scryfall_bulk import ScryfallBulkClient
 from mtg_mcp_server.services.seventeen_lands import SeventeenLandsClient
@@ -2009,6 +2009,14 @@ async def rules_lookup(
             description="Narrow search to a section (e.g. 'combat', 'stack', 'lands', 'state-based')"
         ),
     ] = None,
+    limit: Annotated[
+        int,
+        Field(
+            description="Maximum rules to return from a keyword search (default 100, max 200)",
+            ge=1,
+            le=200,
+        ),
+    ] = DEFAULT_SEARCH_LIMIT,
     response_format: Annotated[
         Literal["detailed", "concise"],
         Field(description="Output verbosity: 'detailed' (default) or 'concise'"),
@@ -2024,6 +2032,7 @@ async def rules_lookup(
         result = await impl(
             query,
             section=section,
+            limit=limit,
             rules=_require_rules(),
             response_format=response_format,
         )
