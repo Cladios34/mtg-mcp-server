@@ -395,3 +395,74 @@ async def test_scenario_ranking_on_the_real_corpus():
     assert "702.19b" in ranked[:5], f"702.19b should rank top-5, got {ranked[:8]}"
     # A verification aid has to be readable; 215 KB is a haystack.
     assert len(result.markdown) < 20_000, f"{len(result.markdown)} chars"
+
+
+def _annotated_questions() -> dict:
+    import json
+    import pathlib
+
+    path = pathlib.Path(__file__).parent.parent / "fixtures" / "rules" / "annotated_questions.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.live
+async def test_every_annotated_rule_exists_in_the_corpus():
+    """The question set is only worth what its annotations are worth.
+
+    An expected rule that does not exist scores as a permanent miss, and the
+    tuning it motivates chases a rule that was never there. Three numbers
+    recalled from memory were wrong while this set was built (702.82a is Devour,
+    702.22b is Bands With Other, 702.111a answers nothing), so the annotations
+    are checked against the corpus rather than trusted.
+
+    This also catches a Comprehensive Rules update renumbering a rule: the set
+    is pinned to a corpus version, and a silent renumber would quietly turn
+    good annotations into misses.
+    """
+    from mtg_mcp_server.config import Settings
+    from mtg_mcp_server.services.rules import RulesService
+
+    service = RulesService(rules_url=Settings().rules_url, refresh_hours=168)
+    await service.ensure_loaded()
+
+    missing = [
+        (q["id"], number)
+        for q in _annotated_questions()["questions"]
+        for number in q["expected_rules"]
+        if await service.lookup_by_number(number) is None
+    ]
+    assert not missing, f"annotated rules absent from the corpus: {missing}"
+
+
+@pytest.mark.live
+async def test_rules_recall_does_not_regress():
+    """Floor on retrieval recall, measured 2026-07-29 — not a target.
+
+    Baseline on the 30-question set: 9/30 questions put an expected rule in the
+    top 5, and 14/30 never returned it at all. Split by phrasing, 8/17 for
+    questions naming a glossary term against 1/13 for questions phrased in plain
+    language.
+
+    The dominant failure is not ranking. ``keyword_search`` matches literal
+    substrings, so "commander damage" returns nothing at all while rule 903.10a
+    sits in the corpus saying "combat damage by the same commander"; and rules
+    that do match often rank below the per-term cutoff (903.8 is 76th of 88 for
+    "command zone"), so they never become candidates for ranking in the first
+    place. These numbers exist to catch a regression, and to be raised
+    deliberately when that retrieval layer is addressed.
+    """
+    from mtg_mcp_server.config import Settings
+    from mtg_mcp_server.services.rules import RulesService
+    from mtg_mcp_server.workflows.rules import rules_scenario
+
+    service = RulesService(rules_url=Settings().rules_url, refresh_hours=168)
+    await service.ensure_loaded()
+
+    hits_at_5 = 0
+    for question in _annotated_questions()["questions"]:
+        result = await rules_scenario(question["question_en"], rules=service)
+        ranked = [r["number"] for r in result.data["rules"]]
+        if any(number in ranked[:5] for number in question["expected_rules"]):
+            hits_at_5 += 1
+
+    assert hits_at_5 >= 9, f"recall@5 regressed: {hits_at_5}/30, floor is 9/30"
