@@ -96,7 +96,7 @@ Find combos present in (or nearly present in) a Commander decklist.
 | Field | Detail |
 |-------|--------|
 | Input | `commanders: list[str]`, `decklist: list[str]` (card names) |
-| Output | Included combos (fully present) and almost-included combos with card lists and results |
+| Output | Included combos (fully present, uncapped) and almost-included combos capped to the top 50 by popularity with the total stated. Structured content uses slim combo fields plus `almost_included_total`. A combo-dense deck returned 920 almost-included combos; uncapped, the response blew the 100KB middleware ceiling and the structured content was silently dropped |
 | Backend | `SpellbookClient.find_decklist_combos()` |
 | Annotations | readOnly=true, idempotent=true, openWorld=true |
 
