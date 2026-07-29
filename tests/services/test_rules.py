@@ -282,6 +282,69 @@ class TestKeywordSearch:
         assert results == []
 
 
+class TestMultiWordSearch:
+    """A phrase that is not a literal substring must still find its rules.
+
+    Origin (2026-07-29), measured on the real corpus with the 30-question set:
+    the search matched the whole query as one substring, so "commander damage"
+    returned NOTHING while rule 903.10a sat in the corpus saying "combat damage
+    by the same commander". Zero results read as "the rules do not cover this",
+    which is the worst possible answer from a verification aid.
+
+    Fourteen of thirty annotated questions never retrieved their rule at all.
+    """
+
+    async def test_multi_word_query_finds_rules_containing_the_terms(
+        self, service: RulesService
+    ) -> None:
+        """702.2b holds both words; only the exact phrase is missing."""
+        results = await service.keyword_search("deathtouch damage")
+        numbers = [r.number for r in results]
+        assert "702.2b" in numbers, f"expected 702.2b, got {numbers}"
+
+    async def test_rules_covering_every_term_outrank_partial_matches(
+        self, service: RulesService
+    ) -> None:
+        """Covering every term beats matching only the common one.
+
+        "creature" alone matches most of the corpus and discriminates nothing,
+        so a rule holding all three terms has to outrank one holding only that.
+        Asserted as a relation rather than a fixed position: which of the two
+        trample rules leads is a judgement call, but 702.19b coming after a rule
+        that only shares the word "creature" would not be.
+
+        The query says "blocking", not "blocked": 702.19b writes "the creatures
+        blocking it", and the search does not stem. Written as "blocked" first,
+        this test failed for that reason alone.
+        """
+        results = await service.keyword_search("trample blocking creature")
+        numbers = [r.number for r in results]
+        assert "702.19b" in numbers, f"expected 702.19b somewhere, got {numbers[:5]}"
+        assert "702.2b" in numbers, f"expected 702.2b somewhere, got {numbers[:5]}"
+        assert numbers.index("702.19b") < numbers.index("702.2b"), (
+            f"a rule covering all three terms must outrank one covering only "
+            f"'creature', got {numbers[:5]}"
+        )
+
+    async def test_exact_phrase_still_wins_when_it_exists(self, service: RulesService) -> None:
+        """A real phrase must not be diluted into its separate words."""
+        results = await service.keyword_search("state-based action")
+        assert results, "expected results"
+        assert "state-based action" in results[0].text.lower()
+
+    async def test_single_word_search_is_unchanged(self, service: RulesService) -> None:
+        """The single-term path keeps its existing behaviour."""
+        results = await service.keyword_search("deathtouch")
+        assert len(results) > 0
+        for rule in results:
+            assert "deathtouch" in rule.text.lower()
+
+    async def test_a_query_of_only_common_words_still_answers(self, service: RulesService) -> None:
+        """Stop words carry no signal, but must not produce a crash or a zero."""
+        results = await service.keyword_search("what happens to it")
+        assert isinstance(results, list)
+
+
 # ---------------------------------------------------------------------------
 # glossary_lookup
 # ---------------------------------------------------------------------------

@@ -395,3 +395,79 @@ async def test_scenario_ranking_on_the_real_corpus():
     assert "702.19b" in ranked[:5], f"702.19b should rank top-5, got {ranked[:8]}"
     # A verification aid has to be readable; 215 KB is a haystack.
     assert len(result.markdown) < 20_000, f"{len(result.markdown)} chars"
+
+
+def _annotated_questions() -> dict:
+    import json
+    import pathlib
+
+    path = pathlib.Path(__file__).parent.parent / "fixtures" / "rules" / "annotated_questions.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.live
+async def test_every_annotated_rule_exists_in_the_corpus():
+    """The question set is only worth what its annotations are worth.
+
+    An expected rule that does not exist scores as a permanent miss, and the
+    tuning it motivates chases a rule that was never there. Three numbers
+    recalled from memory were wrong while this set was built (702.82a is Devour,
+    702.22b is Bands With Other, 702.111a answers nothing), so the annotations
+    are checked against the corpus rather than trusted.
+
+    This also catches a Comprehensive Rules update renumbering a rule: the set
+    is pinned to a corpus version, and a silent renumber would quietly turn
+    good annotations into misses.
+    """
+    from mtg_mcp_server.config import Settings
+    from mtg_mcp_server.services.rules import RulesService
+
+    service = RulesService(rules_url=Settings().rules_url, refresh_hours=168)
+    await service.ensure_loaded()
+
+    missing = [
+        (q["id"], number)
+        for q in _annotated_questions()["questions"]
+        for number in q["expected_rules"]
+        if await service.lookup_by_number(number) is None
+    ]
+    assert not missing, f"annotated rules absent from the corpus: {missing}"
+
+
+@pytest.mark.live
+async def test_rules_recall_does_not_regress():
+    """Floor on retrieval recall, measured 2026-07-29 — not a target.
+
+    First baseline, word-by-word search: 9/30 in the top 5, 14/30 never returned
+    at all, 8/17 named against 1/13 plain.
+
+    After scoring the scenario's terms jointly and weighting each by inverse
+    document frequency: 17/30 in the top 5, 8/30 absent, 15/17 named against
+    2/13 plain. The named/plain gap is the real result. Retrieval was never the
+    limit for questions that name a mechanic; it is still the limit for
+    questions phrased the way a player speaks, and no amount of lexical work
+    reaches those. "My 3/3 gets -3/-3, what happens to it?" is answered by rule
+    704.5f, which says "toughness 0 or less" — a word the question does not
+    contain. That gap is what an embedding would have to close.
+
+    The floors are separate on purpose: a change that lifts the average while
+    quietly losing the plain-language cases would still pass a single number.
+    """
+    from mtg_mcp_server.config import Settings
+    from mtg_mcp_server.services.rules import RulesService
+    from mtg_mcp_server.workflows.rules import rules_scenario
+
+    service = RulesService(rules_url=Settings().rules_url, refresh_hours=168)
+    await service.ensure_loaded()
+
+    hits_at_5 = {"named": 0, "plain": 0}
+    for question in _annotated_questions()["questions"]:
+        result = await rules_scenario(question["question_en"], rules=service)
+        ranked = [r["number"] for r in result.data["rules"]]
+        if any(number in ranked[:5] for number in question["expected_rules"]):
+            hits_at_5[question["phrasing"]] += 1
+
+    total = hits_at_5["named"] + hits_at_5["plain"]
+    assert total >= 17, f"recall@5 regressed: {total}/30, floor is 17/30"
+    assert hits_at_5["named"] >= 15, f"named recall@5 regressed: {hits_at_5['named']}/17"
+    assert hits_at_5["plain"] >= 2, f"plain recall@5 regressed: {hits_at_5['plain']}/13"

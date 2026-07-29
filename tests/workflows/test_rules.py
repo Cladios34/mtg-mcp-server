@@ -44,20 +44,23 @@ def _make_rules() -> AsyncMock:
     mock.resolve_section = AsyncMock(
         side_effect=lambda s: s if s.replace(".", "").isdigit() else None
     )
-    mock.keyword_search = AsyncMock(
-        return_value=[
-            Rule(number="702.2a", text="Deathtouch is a static ability."),
-            Rule(
-                number="702.2b",
-                text=(
-                    "A creature with toughness greater than 0 that's been dealt "
-                    "damage by a source with deathtouch since the last time "
-                    "state-based actions were checked is destroyed as a "
-                    "state-based action."
-                ),
+    _found = [
+        Rule(number="702.2a", text="Deathtouch is a static ability."),
+        Rule(
+            number="702.2b",
+            text=(
+                "A creature with toughness greater than 0 that's been dealt "
+                "damage by a source with deathtouch since the last time "
+                "state-based actions were checked is destroyed as a "
+                "state-based action."
             ),
-        ]
-    )
+        ),
+    ]
+    mock.keyword_search = AsyncMock(return_value=_found)
+    # rules_scenario scores the scenario's terms together via search_terms; it no
+    # longer searches word by word. Mocked separately so a mock that only knows
+    # keyword_search cannot silently return an AsyncMock and score nothing.
+    mock.search_terms = AsyncMock(return_value=_found)
     mock.glossary_lookup = AsyncMock(
         return_value=GlossaryEntry(
             term="Deathtouch",
@@ -536,7 +539,7 @@ class TestRulesScenario:
     async def test_returns_relevant_rules(self) -> None:
         """Should extract keywords from scenario and find rules."""
         rules = _make_rules()
-        rules.keyword_search.return_value = [
+        rules.search_terms.return_value = [
             Rule(number="702.2a", text="Deathtouch is a static ability."),
         ]
 
@@ -547,7 +550,13 @@ class TestRulesScenario:
 
         assert isinstance(result, WorkflowResult)
         assert "702.2a" in result.markdown
-        rules.keyword_search.assert_awaited()
+        # Scored as one set of terms, not one search per word: the per-word rank
+        # was document order, and feeding it into the score as relevance is what
+        # kept the Commander rules out of every answer.
+        rules.search_terms.assert_awaited()
+        terms = rules.search_terms.await_args.args[0]
+        assert "deathtouch" in terms
+        assert "with" not in terms, "stop words must not be searched"
 
     @pytest.mark.anyio
     async def test_concise_format(self) -> None:

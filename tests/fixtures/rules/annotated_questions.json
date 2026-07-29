@@ -1,0 +1,283 @@
+{
+  "description": "Annotated rules questions, used to measure retrieval recall against the real Comprehensive Rules corpus (3047 rules).",
+  "corpus": "MagicCompRules 20250404",
+  "created": "2026-07-29",
+  "method": "Every expected rule was read in the real corpus before being written down. Numbers recalled from memory were wrong three times during construction (702.82a is Devour not Split Second, 702.22b is Bands With Other not Ward, 702.111a is a bare definition that answers nothing), which is why no number here is unverified.",
+  "scoring": {
+    "primary": "recall@5 — at least one expected rule in the top 5",
+    "secondary": "full coverage@10 — every expected rule in the top 10",
+    "note": "phrasing is the variable that matters: 'named' questions contain a glossary term, 'plain' ones describe the situation the way a player actually says it. A score that does not separate the two hides the real weakness."
+  },
+  "questions": [
+    {
+      "id": "combat-01",
+      "family": "combat",
+      "phrasing": "named",
+      "question_fr": "Ma créature a contact mortel et piétinement. Elle est bloquée par une 5/5. Combien de dégâts dois-je assigner au bloqueur ?",
+      "question_en": "My creature has deathtouch and trample. It is blocked by a 5/5 creature. How much damage must I assign to the blocker?",
+      "expected_rules": ["702.19b", "702.2b"],
+      "why": "702.19b governs trample assignment and the lethal-damage threshold; 702.2b makes any nonzero deathtouch damage lethal, which is what lowers the required assignment to 1."
+    },
+    {
+      "id": "combat-02",
+      "family": "combat",
+      "phrasing": "plain",
+      "question_fr": "Mon attaquant ne fait qu'un seul dégât mais il détruit quand même la grosse créature qui le bloque. Pourquoi ?",
+      "question_en": "My attacker only deals one damage but it still destroys the big creature blocking it. Why?",
+      "expected_rules": ["702.2b"],
+      "why": "The player is describing deathtouch without naming it. 702.2b is the destruction rule."
+    },
+    {
+      "id": "combat-03",
+      "family": "combat",
+      "phrasing": "named",
+      "question_fr": "Une créature avec menace peut-elle être bloquée par une seule créature ?",
+      "question_en": "Can a creature with menace be blocked by a single creature?",
+      "expected_rules": ["702.111b"],
+      "why": "702.111b carries the restriction. 702.111a only says menace is an evasion ability and answers nothing."
+    },
+    {
+      "id": "combat-04",
+      "family": "combat",
+      "phrasing": "plain",
+      "question_fr": "Je détruis la créature qui bloque juste après la déclaration des bloqueurs. Est-ce que mon attaquant inflige ses dégâts au joueur ?",
+      "question_en": "I destroy the blocking creature right after blockers are declared. Does my attacker deal its damage to the player?",
+      "expected_rules": ["509.1h", "506.4"],
+      "why": "509.1h keeps the attacker blocked once blockers are declared; 506.4 covers the blocker leaving combat. Together they explain why no damage reaches the player."
+    },
+    {
+      "id": "combat-05",
+      "family": "combat",
+      "phrasing": "named",
+      "question_fr": "Comment fonctionne l'initiative dans l'étape de dégâts de combat ?",
+      "question_en": "How does first strike work during the combat damage step?",
+      "expected_rules": ["510.4", "702.7b"],
+      "why": "Both state that only first/double strike creatures assign damage in the first combat damage step. 510.4 is the step rule, 702.7b the keyword rule."
+    },
+    {
+      "id": "combat-06",
+      "family": "combat",
+      "phrasing": "named",
+      "question_fr": "Une créature avec vigilance s'engage-t-elle quand elle attaque ?",
+      "question_en": "Does a creature with vigilance tap when it attacks?",
+      "expected_rules": ["702.20b"],
+      "why": "702.20b is the operative sentence. 702.20a is a bare 'is a static ability' definition."
+    },
+    {
+      "id": "state-01",
+      "family": "state-based",
+      "phrasing": "plain",
+      "question_fr": "Ma créature 3/3 reçoit -3/-3 jusqu'à la fin du tour. Qu'est-ce qui lui arrive exactement ?",
+      "question_en": "My 3/3 creature gets -3/-3 until end of turn. What exactly happens to it?",
+      "expected_rules": ["704.5f"],
+      "why": "Toughness 0 sends it to the graveyard and regeneration cannot replace that. Note 704.5a is the life-total rule and does not apply here."
+    },
+    {
+      "id": "state-02",
+      "family": "state-based",
+      "phrasing": "named",
+      "question_fr": "J'ai deux exemplaires du même permanent légendaire en jeu. Comment fonctionne la règle de légende ?",
+      "question_en": "I control two copies of the same legendary permanent. How does the legend rule work?",
+      "expected_rules": ["704.5j"],
+      "why": "704.5j is the legend rule itself, naming it explicitly."
+    },
+    {
+      "id": "state-03",
+      "family": "state-based",
+      "phrasing": "plain",
+      "question_fr": "Ma créature a des marqueurs +1/+1 et des marqueurs -1/-1 en même temps. Est-ce qu'ils restent tous les deux ?",
+      "question_en": "My creature has both +1/+1 counters and -1/-1 counters at the same time. Do they both stay on it?",
+      "expected_rules": ["704.5q"],
+      "why": "704.5q removes them in pairs as a state-based action."
+    },
+    {
+      "id": "state-04",
+      "family": "state-based",
+      "phrasing": "named",
+      "question_fr": "Une créature indestructible peut-elle mourir des dégâts de combat ?",
+      "question_en": "Can an indestructible creature die from combat damage?",
+      "expected_rules": ["702.12b", "704.5g"],
+      "why": "702.12b exempts it from the lethal-damage state-based action; 704.5g is that action."
+    },
+    {
+      "id": "state-05",
+      "family": "state-based",
+      "phrasing": "plain",
+      "question_fr": "La créature qui portait mon enchantement vient de mourir. Que devient l'enchantement ?",
+      "question_en": "The creature my enchantment was attached to just died. What happens to the enchantment?",
+      "expected_rules": ["704.5m"],
+      "why": "An Aura attached to nothing goes to its owner's graveyard as a state-based action."
+    },
+    {
+      "id": "zone-01",
+      "family": "zones",
+      "phrasing": "plain",
+      "question_fr": "Ma créature est exilée au lieu d'aller au cimetière. Mes déclencheurs \"quand elle meurt\" fonctionnent-ils quand même ?",
+      "question_en": "My creature is exiled instead of going to the graveyard. Do my \"when this dies\" triggers still work?",
+      "expected_rules": ["700.4"],
+      "why": "700.4 defines dies as battlefield-to-graveyard only, which is why exile does not trigger it."
+    },
+    {
+      "id": "zone-02",
+      "family": "zones",
+      "phrasing": "plain",
+      "question_fr": "Je renvoie une créature du cimetière au champ de bataille. Garde-t-elle les marqueurs et les auras qu'elle avait avant de mourir ?",
+      "question_en": "I return a creature from the graveyard to the battlefield. Does it keep the counters and auras it had before it died?",
+      "expected_rules": ["400.7"],
+      "why": "400.7 makes it a new object with no memory of its previous existence."
+    },
+    {
+      "id": "zone-03",
+      "family": "zones",
+      "phrasing": "named",
+      "question_fr": "Que devient un jeton quand il quitte le champ de bataille ?",
+      "question_en": "What happens to a token when it leaves the battlefield?",
+      "expected_rules": ["111.7"],
+      "why": "111.7 makes it cease to exist as a state-based action, after triggers have triggered."
+    },
+    {
+      "id": "zone-04",
+      "family": "zones",
+      "phrasing": "named",
+      "question_fr": "Mon commandant meurt. Puis-je le remettre dans la zone de commandement ?",
+      "question_en": "My commander dies. Can I put it back into the command zone?",
+      "expected_rules": ["903.9a"],
+      "why": "903.9a is the state-based action that offers the command zone from graveyard or exile."
+    },
+    {
+      "id": "stack-01",
+      "family": "stack-timing",
+      "phrasing": "named",
+      "question_fr": "Puis-je répondre à un sort qui a temps de latence ?",
+      "question_en": "Can I respond to a spell with split second?",
+      "expected_rules": ["702.61a"],
+      "why": "702.61a forbids casting spells and activating most abilities while it is on the stack."
+    },
+    {
+      "id": "stack-02",
+      "family": "stack-timing",
+      "phrasing": "plain",
+      "question_fr": "Trois de mes capacités se déclenchent en même temps. Dans quel ordre se résolvent-elles ?",
+      "question_en": "Three of my abilities trigger at the same time. In what order do they resolve?",
+      "expected_rules": ["603.3b"],
+      "why": "603.3b is the APNAP ordering rule for simultaneous triggers, and lets the controller order their own."
+    },
+    {
+      "id": "stack-03",
+      "family": "stack-timing",
+      "phrasing": "named",
+      "question_fr": "Comment fonctionne la garde quand je cible la créature adverse ?",
+      "question_en": "How does ward work when I target the opponent's creature?",
+      "expected_rules": ["702.21a"],
+      "why": "702.21a is the triggered ability that counters the spell unless the cost is paid."
+    },
+    {
+      "id": "stack-04",
+      "family": "stack-timing",
+      "phrasing": "plain",
+      "question_fr": "À quel moment exactement le jeu vérifie-t-il si une créature doit mourir ?",
+      "question_en": "At what exact moment does the game check whether a creature should die?",
+      "expected_rules": ["704.3"],
+      "why": "704.3 sets the timing: whenever a player would receive priority, checked as a single simultaneous event."
+    },
+    {
+      "id": "stack-05",
+      "family": "stack-timing",
+      "phrasing": "plain",
+      "question_fr": "Le mana que je n'ai pas dépensé reste-t-il disponible pour la suite du tour ?",
+      "question_en": "Does mana I did not spend stay available for the rest of the turn?",
+      "expected_rules": ["500.4"],
+      "why": "500.4 empties the mana pool at the end of every step and phase."
+    },
+    {
+      "id": "cost-01",
+      "family": "costs",
+      "phrasing": "plain",
+      "question_fr": "Mes sorts coûtent 2 de moins. Est-ce que ça réduit aussi le mana coloré de leur coût ?",
+      "question_en": "My spells cost 2 less to cast. Does that also reduce the colored mana in their cost?",
+      "expected_rules": ["601.2f"],
+      "why": "601.2f is the total-cost rule; generic reduction cannot take the cost below {0} and does not remove colored requirements."
+    },
+    {
+      "id": "cost-02",
+      "family": "costs",
+      "phrasing": "named",
+      "question_fr": "Comment payer un sort avec convocation ?",
+      "question_en": "How do I pay for a spell with convoke?",
+      "expected_rules": ["702.51a"],
+      "why": "702.51a lets you tap creatures instead of paying mana, colored mana matching the creature's color."
+    },
+    {
+      "id": "cost-03",
+      "family": "costs",
+      "phrasing": "named",
+      "question_fr": "Combien coûte mon commandant après l'avoir relancé trois fois depuis la zone de commandement ?",
+      "question_en": "How much does my commander cost after casting it three times from the command zone?",
+      "expected_rules": ["903.8"],
+      "why": "903.8 is the commander tax: an additional {2} per previous cast from the command zone."
+    },
+    {
+      "id": "cmdr-01",
+      "family": "commander",
+      "phrasing": "named",
+      "question_fr": "Une carte dont le texte contient un symbole de mana hors de mon identité de couleur est-elle jouable dans mon deck Commander ?",
+      "question_en": "Can a card whose rules text contains a mana symbol outside my color identity go in my Commander deck?",
+      "expected_rules": ["903.4"],
+      "why": "903.4 defines color identity as mana cost plus mana symbols in rules text, which is exactly the case asked about."
+    },
+    {
+      "id": "cmdr-02",
+      "family": "commander",
+      "phrasing": "named",
+      "question_fr": "Combien de dégâts de commandant faut-il pour éliminer un joueur ?",
+      "question_en": "How much commander damage does it take to eliminate a player?",
+      "expected_rules": ["903.10a"],
+      "why": "903.10a sets 21 combat damage from the same commander as a state-based loss."
+    },
+    {
+      "id": "misc-01",
+      "family": "keywords",
+      "phrasing": "named",
+      "question_fr": "Quelle est la différence entre linceul et défense talismanique ?",
+      "question_en": "What is the difference between shroud and hexproof?",
+      "expected_rules": ["702.11b", "702.18a"],
+      "why": "702.18a blocks all targeting including your own; 702.11b blocks only opponents. The contrast is the answer."
+    },
+    {
+      "id": "misc-02",
+      "family": "keywords",
+      "phrasing": "plain",
+      "question_fr": "Ma créature vient d'arriver sur le champ de bataille. Puis-je l'engager tout de suite pour activer sa capacité ?",
+      "question_en": "My creature just entered the battlefield. Can I tap it right away to activate its ability?",
+      "expected_rules": ["302.6"],
+      "why": "302.6 is the summoning sickness rule, restricting tap-symbol abilities and attacking."
+    },
+    {
+      "id": "misc-03",
+      "family": "keywords",
+      "phrasing": "named",
+      "question_fr": "Quand je copie une créature, quelles caractéristiques sont copiées ?",
+      "question_en": "When I copy a creature, which characteristics are copied?",
+      "expected_rules": ["707.2"],
+      "why": "707.2 defines copiable values, excluding counters and non-copy effects."
+    },
+    {
+      "id": "misc-04",
+      "family": "keywords",
+      "phrasing": "named",
+      "question_fr": "Ma créature a protection contre le rouge. Un sort rouge peut-il la cibler ?",
+      "question_en": "My creature has protection from red. Can a red spell target it?",
+      "expected_rules": ["702.16b"],
+      "why": "702.16b is the targeting clause of protection specifically."
+    },
+    {
+      "id": "misc-05",
+      "family": "keywords",
+      "phrasing": "plain",
+      "question_fr": "Deux effets veulent modifier le même événement en même temps. Lequel s'applique en premier ?",
+      "question_en": "Two effects both want to modify the same event at the same time. Which one applies first?",
+      "expected_rules": ["616.1"],
+      "why": "616.1 gives the choice to the affected object's controller or the affected player."
+    }
+  ]
+}
