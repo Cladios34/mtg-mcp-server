@@ -41,6 +41,11 @@ _ZONE_NAMES = {
     "C": "Command Zone",
 }
 
+# Almost-included combos shown by find_decklist_combos, most popular first.
+# 50 slim combos + a worst-case included list stay well under the 100KB
+# response ceiling (920 uncapped almost-included measured on a real deck).
+_MAX_ALMOST_INCLUDED = 50
+
 # Module-level client set by the lifespan. See scryfall.py for pattern rationale.
 _client: SpellbookClient | None = None
 
@@ -196,14 +201,41 @@ async def find_decklist_combos(
     else:
         lines.append("\nNo fully included combos found.")
 
+    # GOTCHA(2026-07-29): almost-included must be CAPPED, not just slimmed. A
+    # combo-dense 99-card deck returned 920 almost-included combos; rendered in
+    # full, the response blew the 100KB ResponseLimitingMiddleware ceiling and
+    # the whole structured_content was silently dropped (the tool then looked
+    # broken: params echo only). Included combos are the tool's primary answer
+    # and stay uncapped; they number at most a few dozen on extreme decks.
+    almost_total = len(result.almost_included)
+    almost_shown = sorted(result.almost_included, key=lambda c: c.popularity or 0, reverse=True)[
+        :_MAX_ALMOST_INCLUDED
+    ]
+
     if result.almost_included:
-        lines.append(f"\n**Almost included combos ({len(result.almost_included)}):**")
-        for combo in result.almost_included:
+        if almost_total > _MAX_ALMOST_INCLUDED:
+            lines.append(
+                f"\n**Almost included combos "
+                f"(top {_MAX_ALMOST_INCLUDED} of {almost_total}, by popularity):**"
+            )
+        else:
+            lines.append(f"\n**Almost included combos ({almost_total}):**")
+        for combo in almost_shown:
             lines.extend(_format_combo_summary(combo))
+        if almost_total > _MAX_ALMOST_INCLUDED:
+            lines.append(
+                f"\n…and {almost_total - _MAX_ALMOST_INCLUDED} more almost-included "
+                "combos not shown. Use spellbook_find_combos on a specific card to dig deeper."
+            )
 
     return ToolResult(
         content="\n".join(lines) + ATTRIBUTION_SPELLBOOK,
-        structured_content=result.model_dump(mode="json"),
+        structured_content={
+            "identity": result.identity,
+            "included": [slim_combo(c) for c in result.included],
+            "almost_included": [slim_combo(c) for c in almost_shown],
+            "almost_included_total": almost_total,
+        },
     )
 
 

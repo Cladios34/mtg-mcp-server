@@ -157,6 +157,81 @@ class TestFindDecklistCombos:
         assert "included" in sc
         assert "almost_included" in sc
 
+    @respx.mock
+    async def test_structured_content_is_slim(self, client: Client):
+        """Structured combos are slim dicts, not full model dumps.
+
+        The full Combo dump measured 72KB for a 5-card decklist against the
+        live API; past the 100KB ResponseLimitingMiddleware ceiling the whole
+        structured_content was silently dropped, leaving the tool response
+        empty (seen live 2026-07-29).
+        """
+        fixture = _load_fixture("find_my_combos_response.json")
+        respx.post(f"{BASE_URL}/find-my-combos").mock(
+            return_value=httpx.Response(200, json=fixture)
+        )
+
+        result = await client.call_tool(
+            "find_decklist_combos",
+            {
+                "commanders": ["Muldrotha, the Gravetide"],
+                "decklist": ["Sol Ring", "Spore Frog"],
+            },
+        )
+        sc = result.structured_content
+        combos = sc["included"] + sc["almost_included"]
+        assert combos, "fixture should yield at least one combo"
+        for combo in combos:
+            assert set(combo) == {"id", "cards", "results", "color_identity"}
+            assert all(isinstance(name, str) for name in combo["cards"])
+
+    @respx.mock
+    async def test_almost_included_capped_by_popularity(self, client: Client):
+        """Almost-included combos are capped to the most popular, total stated.
+
+        A combo-dense 99-card deck returned 920 almost-included combos against
+        the live API — the uncapped markdown alone exceeded the 100KB
+        middleware ceiling and the structured_content was dropped (2026-07-29).
+        """
+
+        def _combo(i: int) -> dict:
+            return {
+                "id": str(i),
+                "uses": [{"card": {"name": f"Card {i}"}, "zoneLocations": ["H"]}],
+                "produces": [{"feature": {"name": "Win the game"}, "quantity": 1}],
+                "popularity": i,
+            }
+
+        fixture = {
+            "results": {
+                "identity": "BGU",
+                "included": [],
+                "almostIncluded": [_combo(i) for i in range(1, 61)],
+            }
+        }
+        respx.post(f"{BASE_URL}/find-my-combos").mock(
+            return_value=httpx.Response(200, json=fixture)
+        )
+
+        result = await client.call_tool(
+            "find_decklist_combos",
+            {
+                "commanders": ["Muldrotha, the Gravetide"],
+                "decklist": ["Sol Ring", "Spore Frog"],
+            },
+        )
+        sc = result.structured_content
+        assert len(sc["almost_included"]) == 50
+        assert sc["almost_included_total"] == 60
+        # The cap keeps the MOST popular combos (popularity == id here).
+        kept_ids = {c["id"] for c in sc["almost_included"]}
+        assert "60" in kept_ids
+        assert "1" not in kept_ids
+
+        text = result.content[0].text
+        assert "top 50 of 60" in text
+        assert "10 more" in text
+
 
 class TestEstimateBracket:
     """Spellbook estimate_bracket tool behavior."""
