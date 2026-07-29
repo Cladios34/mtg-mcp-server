@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from mtg_mcp_server.services.rules import DEFAULT_SEARCH_LIMIT
 from mtg_mcp_server.types import Card, CardPrices, GlossaryEntry, Rule
 from mtg_mcp_server.workflows import WorkflowResult
 from mtg_mcp_server.workflows.rules import (
@@ -148,7 +149,7 @@ class TestRulesLookup:
         assert isinstance(result, WorkflowResult)
         assert "702.2a" in result.markdown
         assert "702.2b" in result.markdown
-        rules.keyword_search.assert_awaited_once_with("deathtouch")
+        rules.keyword_search.assert_awaited_once_with("deathtouch", limit=DEFAULT_SEARCH_LIMIT)
 
     @pytest.mark.anyio
     async def test_section_filter(self) -> None:

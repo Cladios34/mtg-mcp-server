@@ -32,6 +32,16 @@ log = structlog.get_logger(service="rules")
 # rather than in each of the five tools that reach it.
 MAX_SEARCH_LENGTH = 200
 
+# A broad search matches far more than a reader used to be shown: "creature" hits
+# 567 of the 3047 rules, and only 20 came back. Rule text is 200 characters at the
+# median, so 100 rules is about 20 KB against the server's 100 KB response ceiling.
+DEFAULT_SEARCH_LIMIT = 100
+
+# Hard cap. The p90 rule is 502 characters and the longest is 2689, so a request
+# for everything could otherwise build a response the middleware would truncate,
+# which loses results silently rather than reporting them.
+MAX_SEARCH_LIMIT = 200
+
 # Rule numbers: digits, dot, digits, optional letter suffix
 # e.g., "100.1", "100.2a", "704.5k", "702.19b"
 _RULE_NUMBER_RE = re.compile(r"^(\d{3}\.\d+[a-z]?)\.?\s")
@@ -143,7 +153,7 @@ class RulesService:
         normalized = number.rstrip(".")
         return self._rules.get(normalized)
 
-    async def keyword_search(self, keyword: str) -> list[Rule]:
+    async def keyword_search(self, keyword: str, limit: int = DEFAULT_SEARCH_LIMIT) -> list[Rule]:
         """Search rule text for a keyword, ranked by relevance.
 
         Ranking priority:
@@ -151,7 +161,13 @@ class RulesService:
         2. Word boundary match (keyword appears as a whole word)
         3. Substring match
 
-        Returns at most 20 results.
+        Args:
+            keyword: The term to search for. Bounded at :data:`MAX_SEARCH_LENGTH`.
+            limit: Maximum rules to return, capped at :data:`MAX_SEARCH_LIMIT`.
+
+        Returns:
+            Up to ``limit`` rules, most relevant first. The total number that
+            matched is not reported here; callers that need it count separately.
         """
         if len(keyword) > MAX_SEARCH_LENGTH:
             raise ValueError(
@@ -179,7 +195,7 @@ class RulesService:
                 substring.append(rule)
 
         combined = exact + word_boundary + substring
-        return combined[:20]
+        return combined[: max(1, min(limit, MAX_SEARCH_LIMIT))]
 
     async def glossary_lookup(self, term: str) -> GlossaryEntry | None:
         """Look up a glossary term. Case-insensitive exact match."""

@@ -768,8 +768,8 @@ Look up rules by number or keyword search.
 
 | Field | Detail |
 |-------|--------|
-| Input | `query: str` (rule number like "704.5k" or keyword like "deathtouch"), `section: str | None = None` |
-| Output | Markdown with: matching rules with full text, parent/child rules, cross-references |
+| Input | `query: str` (rule number like "704.5k" or keyword like "deathtouch"), `section: str \| None = None`, `limit: int = 100` (max 200) |
+| Output | Markdown with: matching rules with full text, parent/child rules, cross-references. When the result hits `limit`, the output says so rather than presenting a capped list as the whole answer |
 | Backends | RulesService (local) |
 | Annotations | readOnly=true, idempotent=true, openWorld=true |
 

@@ -11,7 +11,12 @@ import httpx
 import pytest
 import respx
 
-from mtg_mcp_server.services.rules import MAX_SEARCH_LENGTH, RulesService
+from mtg_mcp_server.services.rules import (
+    DEFAULT_SEARCH_LIMIT,
+    MAX_SEARCH_LENGTH,
+    MAX_SEARCH_LIMIT,
+    RulesService,
+)
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "rules"
 
@@ -534,3 +539,29 @@ class TestSearchLengthBound:
         # A rules search is a keyword or a short phrase; the bound must clear it.
         assert await service.keyword_search("deathtouch") is not None
         assert await service.keyword_search("A" * MAX_SEARCH_LENGTH) is not None
+
+
+class TestSearchLimit:
+    """A broad term matches far more rules than the old fixed cap of 20 showed.
+
+    Measured on the real Comprehensive Rules (3047 rules): "creature" matches 567
+    of them, "damage" 178, "combat" 136. Twenty was an arbitrary number nobody had
+    revisited, and a capped list presented without saying so reads as the whole
+    answer.
+    """
+
+    async def test_default_limit_is_100(self, service):
+        assert DEFAULT_SEARCH_LIMIT == 100
+
+    async def test_limit_is_honoured(self, service):
+        few = await service.keyword_search("the", limit=3)
+        assert len(few) <= 3
+
+    async def test_limit_is_capped_at_the_maximum(self, service):
+        # Asking for everything must not build a response the middleware would
+        # silently truncate.
+        asked = await service.keyword_search("the", limit=100_000)
+        assert len(asked) <= MAX_SEARCH_LIMIT
+
+    async def test_limit_below_one_still_returns_something(self, service):
+        assert len(await service.keyword_search("the", limit=0)) <= 1

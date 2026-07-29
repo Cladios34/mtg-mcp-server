@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from mtg_mcp_server.services.rules import DEFAULT_SEARCH_LIMIT
 from mtg_mcp_server.utils.slim import slim_rule
 from mtg_mcp_server.workflows import WorkflowResult
 
@@ -227,6 +228,7 @@ async def rules_lookup(
     *,
     rules: RulesService,
     section: str | None = None,
+    limit: int = DEFAULT_SEARCH_LIMIT,
     response_format: ResponseFormat = "detailed",
 ) -> WorkflowResult:
     """Look up Magic rules by number or keyword search.
@@ -239,6 +241,7 @@ async def rules_lookup(
         query: A rule number (e.g. "704.5k") or keyword (e.g. "deathtouch").
         rules: Initialized RulesService.
         section: Optional section prefix to filter results.
+        limit: Maximum rules to return from a keyword search.
         response_format: ``"detailed"`` (default) or ``"concise"``.
 
     Returns:
@@ -248,6 +251,10 @@ async def rules_lookup(
     fmt = _get_rule_formatter(response_format)
 
     found_rules: list[Rule] = []
+    # A number lookup returns one rule and is never capped; only a keyword search
+    # can be. Set here rather than in the branch so the reporting below always has
+    # a value to read.
+    capped = False
 
     if _is_rule_number(query.strip()):
         # Direct rule number lookup
@@ -256,7 +263,11 @@ async def rules_lookup(
             found_rules = [result]
     else:
         # Keyword search
-        found_rules = await rules.keyword_search(query)
+        found_rules = await rules.keyword_search(query, limit=limit)
+        # A broad term matches far more than fits: 'creature' hits 567 of 3047
+        # rules. Showing a capped list without saying so reads as the whole
+        # answer, which is the reason this flag exists.
+        capped = len(found_rules) >= limit
 
     # Apply section filter — resolve text names to numeric prefixes
     if section and found_rules:
@@ -281,7 +292,13 @@ async def rules_lookup(
         if section:
             lines.append(f"*Filtered to section {section}*")
             lines.append("")
-        lines.append(f"Found {len(found_rules)} rule(s):")
+        if capped:
+            lines.append(
+                f"Found {len(found_rules)} rule(s), capped at the limit of {limit}. "
+                "More rules match this term: narrow the search or raise `limit`."
+            )
+        else:
+            lines.append(f"Found {len(found_rules)} rule(s):")
         lines.append("")
         for rule in found_rules:
             lines.append(f"- {fmt(rule)}")
