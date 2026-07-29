@@ -213,7 +213,15 @@ class ScryfallBulkClient:
             if not self._is_stale():
                 return
 
-            is_refresh = self._loaded_at > 0
+            # Whether this is a refresh is "do we already hold data", not the
+            # sign of a timestamp. GOTCHA(2026-07-29): this read
+            # ``self._loaded_at > 0``, and time.monotonic() counts from boot, so
+            # on a host up for less than the refresh interval the timestamp is
+            # negative and a refresh was misread as a first load — propagating
+            # the error instead of serving the pool we already had. It surfaced
+            # as a CI failure on one Python version only, because that runner
+            # happened to have a shorter uptime.
+            is_refresh = bool(self._cards)
             log.info("scryfall_bulk.loading", base_url=self._base_url, is_refresh=is_refresh)
 
             try:

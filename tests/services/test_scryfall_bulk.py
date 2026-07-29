@@ -1287,6 +1287,37 @@ class TestTruncatedPayloadGuards:
                 await client.ensure_loaded()
                 assert len(await client.all_cards()) > 0
 
+    async def test_refresh_failure_is_swallowed_on_a_freshly_booted_host(self):
+        """A refresh failure must serve stale data whatever the machine's uptime.
+
+        Origin (2026-07-29): "is this a refresh?" was answered by
+        ``self._loaded_at > 0``, a monotonic timestamp. ``time.monotonic()``
+        counts from boot, so on a host up for less than the refresh interval the
+        stored timestamp is NEGATIVE and a refresh was misread as a first load
+        — which propagates instead of serving what we already have. It failed in
+        CI on one Python version and passed on the other purely because the two
+        runners had different uptimes, and it would hit a production server for
+        the first hours after every restart.
+        """
+        with respx.mock:
+            _mock_metadata_route(respx)
+            _mock_download_route(respx, headers={"ETag": '"v1"'})
+
+            client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=1)
+            async with client:
+                await client.ensure_loaded()
+                healthy = len(await client.all_cards())
+                assert healthy > 4
+
+                respx.reset()
+                _mock_metadata_route(respx)
+                _mock_download_route(respx, content=b"{not json at all")
+                # A host booted 10 minutes ago, asked for a 1-hour refresh.
+                client._loaded_at = -3000.0
+
+                await client.ensure_loaded()
+                assert len(await client.all_cards()) == healthy
+
     async def test_unreadable_lines_are_counted_in_the_denominator(self):
         """ "0 of 1000" about a file whose other 29000 lines were unreadable sends
         whoever reads it looking in the wrong place."""
