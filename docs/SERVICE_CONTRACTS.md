@@ -397,15 +397,33 @@ The Oracle Cards bulk data is discovered via the `/bulk-data` endpoint, which re
 
 Card objects in the bulk data use the **same shape** as Scryfall API responses — no field mapping needed. The `Card` Pydantic model parses both API and bulk data responses identically.
 
+#### Download field and payload format (changed 2026-07)
+
+Three things changed together upstream. Verified against the live endpoint on 2026-07-29:
+
+| Aspect | Before | Now |
+|---|---|---|
+| Metadata field | `download_uri` | **`jsonl_download_uri`** (`download_uri` is gone) |
+| Payload | JSON array of card objects | **JSONL**, one card object per line |
+| Transfer | Plain JSON | **Gzipped**, `Content-Type: application/gzip` with **no** `Content-Encoding` |
+
+The missing `Content-Encoding` matters: httpx only decompresses on that header, so the client gunzips the body itself. Detection is on the gzip magic number rather than the URL suffix or content type, both of which have already changed once.
+
+The metadata also dropped `content_type`/`content_encoding` in favour of `compressed_size` (~24 MB as of 2026-07-29).
+
+Both the old field name and the JSON array payload are still accepted, so an upstream rollback is not an outage.
+
 ### Service Architecture
 
 `ScryfallBulkClient` is **not** a `BaseClient` subclass. It's a file-based service that:
-1. Discovers the download URL via Scryfall's `/bulk-data` endpoint
-2. Downloads the Oracle Cards JSON file lazily on first access (not at startup)
-3. Parses into `dict[str, Card]` keyed by lowercase name for O(1) lookups
-4. Filters out non-playable layouts (art_series, token, double_faced_token, emblem, vanguard, planar, scheme, augment, host) to prevent overwriting real cards
-5. Runs background refresh via `start_background_refresh()` every `MTG_MCP_BULK_DATA_REFRESH_HOURS` (default 12h)
-6. On refresh failure with existing data, serves stale data rather than failing
+1. Discovers the download URL via Scryfall's `/bulk-data` endpoint, reading `jsonl_download_uri` and falling back to the legacy `download_uri`
+2. Downloads the Oracle Cards file lazily on first access (not at startup)
+3. Gunzips it if gzipped, then reads it as JSONL (falling back to a JSON array), streaming line by line rather than materialising the expanded payload
+4. Parses into `dict[str, Card]` keyed by lowercase name for O(1) lookups
+5. Filters out non-playable layouts (art_series, token, double_faced_token, emblem, vanguard, planar, scheme, augment, host) to prevent overwriting real cards
+6. Runs background refresh via `start_background_refresh()` every `MTG_MCP_BULK_DATA_REFRESH_HOURS` (default 12h)
+7. On refresh failure with existing data, serves stale data rather than failing
+8. Refuses a refresh that would shrink the card pool by more than half, so a truncated or re-encoded payload cannot silently replace a healthy pool with one that answers "card not found" to everything
 
 ### Key Methods
 

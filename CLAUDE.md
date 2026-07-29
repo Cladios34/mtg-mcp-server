@@ -155,6 +155,8 @@ When reviewing PRs (automated CI or manual), verify these project-specific compl
 - When compacting, preserve the list of which services/providers are implemented vs stubbed.
 - Service caching: all service methods use `@async_cached` with class-level `TTLCache`. Tests must clear caches (autouse `_clear_caches` fixture in conftest.py).
 - Scryfall bulk data is behind `MTG_MCP_ENABLE_BULK_DATA` feature flag. It's a file-based service (not BaseClient). Lazy-loads on first access. Returns full `Card` objects (same as Scryfall API).
+- Scryfall bulk payload (changed 2026-07): read `jsonl_download_uri`, not `download_uri`. The body is gzipped JSONL served as `Content-Type: application/gzip` with **no** `Content-Encoding`, so httpx does NOT decompress it for you. A fixture still serving the old JSON array keeps the whole suite green while production is down: fixtures must match the wire.
+- Castability is judged on the ENTRY cost, not the mana value. A card with an alternative casting cost (Warp, Evoke, Impending) is playable the turn that cost is payable. See `utils/mechanics.alternative_cast_cost`. Detection requires the keyword in Scryfall's `keywords` AND a mana cost after it in the oracle text: "Warp Vortex" is the name of a triggered ability, not the Warp keyword.
 - Always `uv run python3`, never bare `python3` — the venv may not be activated in shell.
 - `Client.call_tool()` returns `CallToolResult` (not subscriptable). Access text via `.content[0].text`. For error tests, use `raise_on_error=False` then check `.is_error`.
 
