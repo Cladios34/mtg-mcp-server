@@ -14,11 +14,18 @@ Each of these is a mechanical rule that should never have been left to judgement
 
 from __future__ import annotations
 
+import contextlib
+import time
+
+import pytest
+
 from mtg_mcp_server.types import Card
 from mtg_mcp_server.utils.mechanics import (
+    MAX_KEYWORD_LENGTH,
     AlternativeCost,
     alternative_cast_cost,
     apply_generic_reduction,
+    carries_keyword,
     creature_types,
     has_creature_type,
     has_reduction_clause,
@@ -455,3 +462,61 @@ class TestAlternativeCastCost:
         assert alternative_cast_cost(card) == AlternativeCost(
             value=1, keyword="Warp", cost="{X}{R}"
         )
+
+
+class TestKeywordLengthBound:
+    """A keyword arrives from a tool argument a client controls freely.
+
+    Origin (2026-07-29): the pattern cache was bounded in entry COUNT but not in
+    entry SIZE. Compiling the regex is linear in the keyword's length and runs on
+    the server's single event loop, so one call was enough to freeze it: measured
+    819 ms at 100 KB, 3.3 s at 400 KB, minutes at a few MB. The 256-entry cache
+    then held every one of them. The longest real Magic keyword is 23 characters
+    ("More Than Meets the Eye").
+    """
+
+    def test_absurd_keyword_is_refused_before_it_costs_anything(self) -> None:
+        card = _card(name="Ninja", oracle_text="Ninjutsu {1}{U}")
+        with pytest.raises(ValueError, match="keyword too long"):
+            keyword_activation_cost(card, "A" * 100_000)
+
+    def test_refusal_is_fast(self) -> None:
+        """The point of the bound is that it costs nothing to enforce."""
+        card = _card(name="Ninja", oracle_text="Ninjutsu {1}{U}")
+        start = time.perf_counter()
+        for _ in range(200):
+            with contextlib.suppress(ValueError):
+                keyword_activation_cost(card, "A" * 500_000)
+        # 200 unbounded calls would have taken minutes.
+        assert time.perf_counter() - start < 1.0
+
+    def test_longest_real_magic_keyword_still_works(self) -> None:
+        # "More Than Meets the Eye" is the longest keyword Scryfall lists, at 23
+        # characters. The bound must not be tight enough to reach it.
+        card = _card(
+            name="Transformer",
+            oracle_text="More Than Meets the Eye {1}{W} (You may cast this card converted.)",
+        )
+        assert keyword_activation_cost(card, "More Than Meets the Eye") == "{1}{W}"
+
+    def test_carries_keyword_refuses_too(self) -> None:
+        """declared.py reaches the same cache through a client-supplied filter."""
+        card = _card(name="Ninja", oracle_text="Ninjutsu {1}{U}", keywords=["Ninjutsu"])
+        with pytest.raises(ValueError, match="keyword too long"):
+            carries_keyword(card, "A" * 100_000)
+
+    def test_a_keyword_at_the_bound_is_accepted(self) -> None:
+        card = _card(name="Edge", oracle_text=f"{'K' * MAX_KEYWORD_LENGTH} {{2}}")
+        assert keyword_activation_cost(card, "K" * MAX_KEYWORD_LENGTH) == "{2}"
+
+    def test_one_character_past_the_bound_is_refused(self) -> None:
+        """The boundary itself, so a future off-by-one cannot pass unnoticed."""
+        card = _card(name="Edge", oracle_text="whatever {2}")
+        with pytest.raises(ValueError, match="keyword too long"):
+            keyword_activation_cost(card, "K" * (MAX_KEYWORD_LENGTH + 1))
+
+    def test_an_accented_keyword_within_the_bound_works(self) -> None:
+        """The bound counts characters, not bytes: a non-ASCII keyword of legal
+        length must not be refused for being wider once encoded."""
+        card = _card(name="Accented", oracle_text="Rôdeur nocturne {1}{B}")
+        assert keyword_activation_cost(card, "Rôdeur nocturne") == "{1}{B}"

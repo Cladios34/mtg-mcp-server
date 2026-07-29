@@ -22,6 +22,16 @@ __all__ = ["RulesDownloadError", "RulesError", "RulesService"]
 
 log = structlog.get_logger(service="rules")
 
+# A rules search is a keyword or a short phrase; 200 is far past any real one.
+#
+# GOTCHA(2026-07-29): the search term is compiled into a regex, and the term comes
+# from a tool argument on a public, unauthenticated endpoint. Compilation is linear
+# in its length and runs on the single event loop: measured 52 ms at 100 KB, 239 ms
+# at 400 KB, ~600 ms at 1 MB. Unlike the keyword cost pattern, this one has no
+# cache, so every call recompiles and the cost is repeatable at will. Bounded here
+# rather than in each of the five tools that reach it.
+MAX_SEARCH_LENGTH = 200
+
 # Rule numbers: digits, dot, digits, optional letter suffix
 # e.g., "100.1", "100.2a", "704.5k", "702.19b"
 _RULE_NUMBER_RE = re.compile(r"^(\d{3}\.\d+[a-z]?)\.?\s")
@@ -143,6 +153,12 @@ class RulesService:
 
         Returns at most 20 results.
         """
+        if len(keyword) > MAX_SEARCH_LENGTH:
+            raise ValueError(
+                f"search term too long: {len(keyword)} characters, limit is "
+                f"{MAX_SEARCH_LENGTH}. Rules searches are a keyword or a short phrase."
+            )
+
         await self.ensure_loaded()
         keyword_lower = keyword.lower()
         word_pattern = re.compile(r"\b" + re.escape(keyword_lower) + r"\b", re.IGNORECASE)

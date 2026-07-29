@@ -505,6 +505,8 @@ async def deck_analysis(
             declared_categories=declared_categories,
         )
         return ToolResult(content=result.markdown, structured_content=result.data)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
     except ServiceError as exc:
         raise ToolError(f"deck_analysis failed: {exc}") from exc
 
@@ -603,6 +605,8 @@ async def cost_reduction_check(
             response_format=response_format,
         )
         return ToolResult(content=result.markdown, structured_content=result.data)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
     except ServiceError as exc:
         raise ToolError(f"cost_reduction_check failed: {exc}") from exc
 
@@ -2024,6 +2028,8 @@ async def rules_lookup(
             response_format=response_format,
         )
         return ToolResult(content=result.markdown, structured_content=result.data)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
     except ServiceError as exc:
         raise ToolError(f"rules_lookup failed: {exc}") from exc
 
@@ -2052,6 +2058,8 @@ async def keyword_explain(
             response_format=response_format,
         )
         return ToolResult(content=result.markdown, structured_content=result.data)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
     except ServiceError as exc:
         raise ToolError(f"keyword_explain failed: {exc}") from exc
 
@@ -2080,6 +2088,8 @@ async def rules_interaction(
             response_format=response_format,
         )
         return ToolResult(content=result.markdown, structured_content=result.data)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
     except ServiceError as exc:
         raise ToolError(f"rules_interaction failed: {exc}") from exc
 
@@ -2107,6 +2117,8 @@ async def rules_scenario(
             response_format=response_format,
         )
         return ToolResult(content=result.markdown, structured_content=result.data)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
     except ServiceError as exc:
         raise ToolError(f"rules_scenario failed: {exc}") from exc
 
@@ -2143,6 +2155,8 @@ async def combat_calculator(
             response_format=response_format,
         )
         return ToolResult(content=result.markdown, structured_content=result.data)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
     except ServiceError as exc:
         raise ToolError(f"combat_calculator failed: {exc}") from exc
 

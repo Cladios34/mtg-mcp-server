@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from mtg_mcp_server.types import Card
 
 __all__ = [
+    "MAX_KEYWORD_LENGTH",
     "AlternativeCost",
     "ParsedCost",
     "ReductionResult",
@@ -39,6 +40,17 @@ __all__ = [
     "parse_mana_cost",
     "reduction_amount",
 ]
+
+# The longest keyword Scryfall lists is "More Than Meets the Eye", at 23 characters.
+# 64 leaves room for anything Wizards prints next while keeping the bound meaningful.
+#
+# GOTCHA(2026-07-29): the cost pattern cache is bounded in entry COUNT but not in
+# entry SIZE, and compiling the regex is linear in the keyword's length ON THE
+# SERVER'S SINGLE EVENT LOOP. Measured: 819 ms at 100 KB, 3.3 s at 400 KB, minutes
+# at a few MB. One call was enough to freeze the server for every client, and the
+# cache then held 256 of them. The keyword is a tool argument on a public,
+# unauthenticated endpoint, so it is checked before anything is compiled.
+MAX_KEYWORD_LENGTH = 64
 
 _REDUCTION_PHRASES = ("less to cast", "less to activate", "costs less", "less to play")
 
@@ -183,6 +195,19 @@ def apply_generic_reduction(mana_cost: str | None, amount: int) -> ReductionResu
     )
 
 
+def _reject_oversized_keyword(keyword: str) -> None:
+    """Refuse a keyword no Magic card could carry, before it costs anything.
+
+    Raises:
+        ValueError: If ``keyword`` is longer than :data:`MAX_KEYWORD_LENGTH`.
+    """
+    if len(keyword) > MAX_KEYWORD_LENGTH:
+        raise ValueError(
+            f"keyword too long: {len(keyword)} characters, limit is {MAX_KEYWORD_LENGTH}. "
+            "The longest Magic keyword is 23 characters."
+        )
+
+
 def normalize_keyword(keyword: str) -> str:
     """Normalise a keyword for comparison across cards.
 
@@ -213,6 +238,7 @@ def carries_keyword(card: Card, keyword: str) -> bool:
     be followed by an activation cost, so a card that merely TALKS about the mechanic
     ("Ninjutsu abilities cost {1} less") is not counted as carrying it.
     """
+    _reject_oversized_keyword(keyword)
     wanted = normalize_keyword(keyword)
     if wanted in card_keywords(card):
         return True
@@ -280,12 +306,14 @@ def _keyword_cost_pattern(keyword: str) -> re.Pattern[str]:
     """Compile (and cache) the activation-cost pattern for a keyword.
 
     Bounded on purpose. ``keyword`` reaches here from a tool argument a client
-    controls freely (``cost_reduction_check(keyword=...)``), so an unbounded
-    module-level dict would be a memory leak any caller could grow at will.
+    controls freely (``cost_reduction_check(keyword=...)``, and the ``kw:`` term
+    of a category filter), so an unbounded module-level dict would be a memory
+    leak any caller could grow at will.
 
     "Basic landcycling" and "Commander ninjutsu" are distinct keywords that carry the
     same activation shape as their base form, so both prefixes are optional here.
     """
+    _reject_oversized_keyword(keyword)
     return re.compile(
         rf"(?:commander\s+|basic\s+)?{re.escape(keyword)}\s*((?:\{{[^}}]+\}})+)",
         re.IGNORECASE,
@@ -293,7 +321,12 @@ def _keyword_cost_pattern(keyword: str) -> re.Pattern[str]:
 
 
 def keyword_activation_cost(card: Card, keyword: str) -> str | None:
-    """Extract the mana cost printed right after ``keyword`` in the oracle text."""
+    """Extract the mana cost printed right after ``keyword`` in the oracle text.
+
+    Raises:
+        ValueError: If ``keyword`` is longer than :data:`MAX_KEYWORD_LENGTH`.
+    """
+    _reject_oversized_keyword(keyword)
     oracle = card.oracle_text
     if not oracle:
         return None
