@@ -729,7 +729,7 @@ Apply a cost reducer to a set of costs mechanically, and name what it does NOT r
 
 | Field | Detail |
 |-------|--------|
-| Input | `reducer_card: str`, `target_costs: list[str] \| None`, `target_cards: list[str] \| None`, `keyword: str \| None`, `response_format: "detailed" \| "concise" = "detailed"` |
+| Input | `reducer_card: str`, `target_costs: list[str] \| None`, `target_cards: list[str] \| None`, `keyword: str \| None` (max 64 characters), `response_format: "detailed" \| "concise" = "detailed"` |
 | Output | Per-target `reduced` / `result` / `reason`, plus the count actually reduced out of the total |
 | Backends | Bulk data (optional) + Scryfall (required, fallback resolution) |
 | Annotations | readOnly=true, idempotent=true, openWorld=true |

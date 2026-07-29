@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import time
 from pathlib import Path
 
 import httpx
 import pytest
 import respx
 
-from mtg_mcp_server.services.rules import RulesService
+from mtg_mcp_server.services.rules import MAX_SEARCH_LENGTH, RulesService
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "rules"
 
@@ -506,3 +508,29 @@ class TestStaleData:
             await svc.ensure_loaded()
             rule = await svc.lookup_by_number("100.1")
             assert rule is not None
+
+
+class TestSearchLengthBound:
+    """The search term is compiled into a regex and comes from a tool argument.
+
+    Origin (2026-07-29): found while bounding the same class of bug in
+    utils/mechanics. This path had no cache at all, so every call recompiled and
+    the cost was repeatable at will. Measured before the bound: 52 ms at 100 KB,
+    239 ms at 400 KB, ~600 ms at 1 MB, all on the single event loop.
+    """
+
+    async def test_absurd_search_term_is_refused(self, service):
+        with pytest.raises(ValueError, match="search term too long"):
+            await service.keyword_search("A" * 100_000)
+
+    async def test_refusal_costs_nothing(self, service):
+        start = time.perf_counter()
+        for _ in range(200):
+            with contextlib.suppress(ValueError):
+                await service.keyword_search("A" * 500_000)
+        assert time.perf_counter() - start < 1.0
+
+    async def test_a_real_search_phrase_still_works(self, service):
+        # A rules search is a keyword or a short phrase; the bound must clear it.
+        assert await service.keyword_search("deathtouch") is not None
+        assert await service.keyword_search("A" * MAX_SEARCH_LENGTH) is not None
