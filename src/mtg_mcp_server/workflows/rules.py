@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from mtg_mcp_server.services.rules import DEFAULT_SEARCH_LIMIT
+from mtg_mcp_server.services.rules import DEFAULT_SEARCH_LIMIT, extract_terms
 from mtg_mcp_server.utils.slim import slim_rule
 from mtg_mcp_server.workflows import WorkflowResult
 
@@ -32,101 +32,14 @@ log = structlog.get_logger(service="workflow.rules")
 # Pattern to detect rule numbers: digits and dots, optional trailing letter(s)
 _RULE_NUMBER_RE = re.compile(r"^\d+(\.\d+[a-z]*)*$")
 
-# Minimum word length to try as a keyword when extracting from scenario text
-_MIN_KEYWORD_LEN = 4
-
 # Scenario ranking. A scenario names a handful of mechanics; the rules that
 # govern it are few, and burying them under everything the generic nouns matched
 # is what made this tool unusable as a check on a claim.
-_SCENARIO_PER_TERM = 40  # candidates gathered per word, before ranking
+_SCENARIO_CANDIDATES = 200  # rules scored for the scenario as a whole, before ranking
 _SCENARIO_MAX_RULES = 25  # rules actually returned, ranked
 _RRF_K = 10  # reciprocal-rank smoothing; small K sharpens the head
-_WEIGHT_GLOSSARY_TERM = 3.0  # the word names a real mechanic
-_WEIGHT_PLAIN = 1.0
-_WEIGHT_BROAD = 0.15  # the word matches most of the corpus and means nothing
-_NON_DISCRIMINATING = _SCENARIO_PER_TERM  # a full page of hits discriminates nothing
-_GLOSSARY_CITATION_BONUS = 5.0  # the glossary points at this rule for this word
 _PARENT_SHARE = 0.6  # a subrule inherits this much of its parent's relevance
 _SUBRULE_SUFFIXES = "abcdefghijklmnopqrstuvwxyz"
-
-# "see rule 702.19b" / "rule 704.5" — the corpus resolves 100% of these.
-_RULE_REFERENCE_RE = re.compile(r"\brules?\s+(\d{3}\.\d+[a-z]?)", re.IGNORECASE)
-
-# Common stop words to skip during scenario extraction
-_STOP_WORDS = frozenset(
-    {
-        "a",
-        "an",
-        "the",
-        "is",
-        "are",
-        "was",
-        "were",
-        "be",
-        "been",
-        "being",
-        "have",
-        "has",
-        "had",
-        "do",
-        "does",
-        "did",
-        "will",
-        "would",
-        "could",
-        "should",
-        "may",
-        "might",
-        "can",
-        "shall",
-        "with",
-        "from",
-        "into",
-        "that",
-        "this",
-        "these",
-        "those",
-        "it",
-        "its",
-        "they",
-        "them",
-        "their",
-        "what",
-        "when",
-        "where",
-        "which",
-        "who",
-        "how",
-        "not",
-        "and",
-        "but",
-        "or",
-        "if",
-        "then",
-        "than",
-        "for",
-        "to",
-        "of",
-        "in",
-        "on",
-        "at",
-        "by",
-        "as",
-        "all",
-        "each",
-        "any",
-        "no",
-        "some",
-        "more",
-        "other",
-        "another",
-        "about",
-        "after",
-        "before",
-        "during",
-        "while",
-    }
-)
 
 # Known keyword interactions for keyword_explain and rules_interaction.
 # Maps lowercased keyword to list of (related_keyword, interaction_note).
@@ -576,62 +489,47 @@ async def rules_scenario(
     log.info("rules_scenario.start", scenario_len=len(scenario))
     fmt = _get_rule_formatter(response_format)
 
-    # Extract candidate keywords from the scenario
-    words = re.findall(r"[a-zA-Z]+", scenario.lower())
-    candidates = [w for w in words if len(w) >= _MIN_KEYWORD_LEN and w not in _STOP_WORDS]
-    # Deduplicate while preserving order
-    seen: set[str] = set()
-    unique_candidates: list[str] = []
-    for w in candidates:
-        if w not in seen:
-            seen.add(w)
-            unique_candidates.append(w)
+    # Term extraction is the search layer's own, so the scenario and a direct
+    # search cannot drift apart on what counts as a searchable word.
+    unique_candidates = extract_terms(scenario)
 
-    # Search rules for each candidate keyword, then RANK the union.
+    # Score the scenario's terms together rather than searching each word alone.
     #
-    # Searching each word separately and concatenating in word order put the two
-    # rules that answered a real trample+deathtouch question at ranks 105 and 114
-    # of 368, inside a 215 KB response whose first entries were about APNAP order.
-    # Every rule was retrieved and none was ranked.
+    # GOTCHA(2026-07-29): the word-by-word version could not be fixed by tuning.
+    # Each word was searched separately and the hits merged by their rank WITHIN
+    # that word's result list -- but that list was in document order, so the rank
+    # measured position in the rulebook, not relevance, and was then fed into the
+    # score as though it were relevance. Commander sits at the end of the book,
+    # so rule 903.8 arrived 76th of 88 for "command zone" and its score was
+    # crushed. Measured on the 30-question set: widening the pool alone gave
+    # 9/30, flattening the rank alone gave 9/30, both together 12/30, and
+    # scoring the terms jointly gives 15/30 with less code.
     #
-    # Three signals decide the order, all available without a model:
-    #   - a rule found by SEVERAL words of the scenario beats one found by a
-    #     single word (rules_interaction is exactly what a scenario asks about)
-    #   - a word that is a glossary entry names a real mechanic; a word that
-    #     matches half the corpus ("creature" hits 567 of 3047 rules) names
-    #     nothing and is scored down accordingly
-    #   - a rule the glossary itself points to for that word is the definition
-    all_rules: dict[str, list[Rule]] = {}
+    # Weighting each term by inverse document frequency also subsumes the old
+    # broad/glossary/plain weights: "creature" is in 567 of 3047 rules and is
+    # discounted for it, without a hand-set threshold deciding when a word has
+    # become too common.
     scores: dict[str, float] = {}
     rules_by_number: dict[str, Rule] = {}
 
-    for candidate in unique_candidates:
-        try:
-            found = await rules.keyword_search(candidate, limit=_SCENARIO_PER_TERM)
-        except Exception:
-            log.warning("rules_scenario.search_failed", keyword=candidate, exc_info=True)
-            continue
-        if not found:
-            continue
-        all_rules[candidate] = found
+    try:
+        found = await rules.search_terms(unique_candidates, limit=_SCENARIO_CANDIDATES)
+    except Exception:
+        log.warning("rules_scenario.search_failed", exc_info=True)
+        found = []
 
-        glossary = await rules.glossary_lookup(candidate)
-        if len(found) >= _NON_DISCRIMINATING:
-            weight = _WEIGHT_BROAD
-        elif glossary is not None:
-            weight = _WEIGHT_GLOSSARY_TERM
-        else:
-            weight = _WEIGHT_PLAIN
+    for rank, rule in enumerate(found):
+        rules_by_number[rule.number] = rule
+        scores[rule.number] = 1.0 / (rank + _RRF_K)
 
-        # The rules a glossary entry cites are the definition of the term.
-        cited = set(_RULE_REFERENCE_RE.findall(glossary.definition)) if glossary else set()
-
-        for rank, rule in enumerate(found):
-            rules_by_number.setdefault(rule.number, rule)
-            # Reciprocal rank, so a rule near the top of several searches wins.
-            scores[rule.number] = scores.get(rule.number, 0.0) + weight / (rank + _RRF_K)
-            if rule.number in cited or any(rule.number.startswith(c) for c in cited):
-                scores[rule.number] += _GLOSSARY_CITATION_BONUS
+    # DECISION(2026-07-29): no glossary-citation bonus. Adding a flat +5.0 for a
+    # rule the glossary cites was not a weighting, it was an override: reciprocal
+    # rank tops out at 1/(0+10) = 0.1, so any cited rule jumped the whole ranking
+    # regardless of fit. It also tends to cite the general rule (702.2) over the
+    # subrule that answers (702.2b). Measured on the 30-question set, dropping it
+    # moved recall@5 from 14/30 to 16/30 and named questions from 12/17 to 14/17.
+    # The citation is not lost: a rule the glossary cites for a term almost always
+    # contains that term, so term scoring finds it anyway.
 
     # Hierarchical lift: a subrule whose parent ranks well is about the same
     # mechanic and belongs next to it, even when its own wording matched nothing.
@@ -674,9 +572,9 @@ async def rules_scenario(
             lines.append(f"- {fmt(rule)}")
         lines.append("")
 
-        if response_format == "detailed" and all_rules:
+        if response_format == "detailed" and unique_candidates:
             lines.append(
-                "*Terms searched: " + ", ".join(sorted(all_rules)) + ". "
+                "*Terms searched: " + ", ".join(sorted(unique_candidates)) + ". "
                 "A term matching most of the corpus is scored down; a term the "
                 "glossary defines is scored up.*"
             )
@@ -684,12 +582,12 @@ async def rules_scenario(
     # Build data
     data = {
         "scenario": scenario,
-        "keywords_extracted": list(all_rules.keys()),
+        "keywords_extracted": unique_candidates,
         "rules_matched_total": len(scores),
         "rules": [slim_rule(r) for r in unique_rules],
     }
 
-    log.info("rules_scenario.complete", keywords=len(all_rules), rules=len(unique_rules))
+    log.info("rules_scenario.complete", keywords=len(unique_candidates), rules=len(unique_rules))
     return WorkflowResult(markdown="\n".join(lines), data=data)
 
 

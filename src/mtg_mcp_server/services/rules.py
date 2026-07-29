@@ -9,6 +9,7 @@ pattern as ``ScryfallBulkClient``.
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 import time
 
@@ -42,6 +43,116 @@ DEFAULT_SEARCH_LIMIT = 100
 # for everything could otherwise build a response the middleware would truncate,
 # which loses results silently rather than reporting them.
 MAX_SEARCH_LIMIT = 200
+
+# Words that appear in a question but never narrow a rules search. Deliberately
+# short: this is not a general stop-word list, and dropping a word that carries
+# meaning here ("damage", "counter", "target") would cost more than it saves.
+_STOP_WORDS = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "are",
+        "but",
+        "not",
+        "you",
+        "your",
+        "she",
+        "her",
+        "him",
+        "his",
+        "they",
+        "them",
+        "their",
+        "its",
+        "this",
+        "that",
+        "these",
+        "those",
+        "with",
+        "from",
+        "have",
+        "has",
+        "had",
+        "was",
+        "were",
+        "been",
+        "being",
+        "does",
+        "did",
+        "can",
+        "could",
+        "would",
+        "should",
+        "will",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "whom",
+        "how",
+        "why",
+        "all",
+        "any",
+        "some",
+        "one",
+        "two",
+        "get",
+        "gets",
+        "got",
+        "just",
+        "only",
+        "then",
+        "than",
+        "there",
+        "here",
+        "into",
+        "onto",
+        "out",
+        "off",
+        "over",
+        "under",
+        "again",
+        "still",
+        "same",
+        "other",
+        "another",
+        "both",
+        "each",
+        "much",
+        "many",
+        "more",
+        "most",
+        "less",
+        "least",
+        "very",
+        "too",
+        "also",
+    }
+)
+
+# Terms shorter than this discriminate nothing once stop words are gone.
+_MIN_TERM_LENGTH = 3
+
+_WORD_RE = re.compile(r"[a-z0-9][a-z0-9'\-]*")
+
+
+def extract_terms(text: str) -> list[str]:
+    """Split text into searchable terms, dropping words that carry no signal.
+
+    Order-preserving and deduplicated, so callers can feed the result straight
+    into a search without re-weighting a word that appeared twice.
+    """
+    seen: set[str] = set()
+    terms: list[str] = []
+    for word in _WORD_RE.findall(text.lower()):
+        if word in _STOP_WORDS or len(word) < _MIN_TERM_LENGTH or word in seen:
+            continue
+        seen.add(word)
+        terms.append(word)
+    return terms
+
 
 # Rule numbers: digits, dot, digits, optional letter suffix
 # e.g., "100.1", "100.2a", "704.5k", "702.19b"
@@ -155,15 +266,22 @@ class RulesService:
         return self._rules.get(normalized)
 
     async def keyword_search(self, keyword: str, limit: int = DEFAULT_SEARCH_LIMIT) -> list[Rule]:
-        """Search rule text for a keyword, ranked by relevance.
+        """Search rule text for a keyword or phrase, ranked by relevance.
 
-        Ranking priority:
-        1. Exact match (entire rule text equals the keyword)
-        2. Word boundary match (keyword appears as a whole word)
-        3. Substring match
+        A single term is matched as a substring, ranked exact > whole word >
+        substring. A multi-word query is matched term by term and scored, so a
+        phrasing that never appears verbatim still finds its rules.
+
+        GOTCHA(2026-07-29): this used to match the WHOLE query as one substring.
+        "commander damage" therefore returned nothing at all while rule 903.10a
+        sat in the corpus saying "combat damage by the same commander" -- and a
+        zero from a verification aid reads as "the rules do not cover this".
+        Measured on the 30-question annotated set, 14 of 30 questions never
+        retrieved their rule.
 
         Args:
-            keyword: The term to search for. Bounded at :data:`MAX_SEARCH_LENGTH`.
+            keyword: The term or phrase to search for. Bounded at
+                :data:`MAX_SEARCH_LENGTH`.
             limit: Maximum rules to return, capped at :data:`MAX_SEARCH_LIMIT`.
 
         Returns:
@@ -177,7 +295,40 @@ class RulesService:
             )
 
         await self.ensure_loaded()
-        keyword_lower = keyword.lower()
+        cap = max(1, min(limit, MAX_SEARCH_LIMIT))
+        keyword_lower = keyword.lower().strip()
+
+        terms = extract_terms(keyword_lower)
+        if len(terms) > 1:
+            scored = self._score_by_terms(terms, keyword_lower)
+            if scored:
+                return scored[:cap]
+            # Every term missing from the corpus: fall through so a phrase that
+            # only survives as a substring is still found.
+
+        return self._match_literal(keyword_lower)[:cap]
+
+    async def search_terms(self, terms: list[str], limit: int = DEFAULT_SEARCH_LIMIT) -> list[Rule]:
+        """Rank rules against already-extracted terms, weighted by rarity.
+
+        Same engine as the multi-word branch of :meth:`keyword_search`, for
+        callers that have parsed their own terms out of a longer text. A whole
+        scenario would otherwise trip :data:`MAX_SEARCH_LENGTH`, which exists to
+        bound a regex compiled from client input and should not be raised for
+        this.
+
+        Args:
+            terms: Search terms, already lowercased and filtered.
+            limit: Maximum rules to return, capped at :data:`MAX_SEARCH_LIMIT`.
+        """
+        await self.ensure_loaded()
+        if not terms:
+            return []
+        cap = max(1, min(limit, MAX_SEARCH_LIMIT))
+        return self._score_by_terms(terms, phrase=" ".join(terms))[:cap]
+
+    def _match_literal(self, keyword_lower: str) -> list[Rule]:
+        """Substring match on the whole query, exact > whole word > substring."""
         word_pattern = re.compile(r"\b" + re.escape(keyword_lower) + r"\b", re.IGNORECASE)
 
         exact: list[Rule] = []
@@ -195,8 +346,57 @@ class RulesService:
             else:
                 substring.append(rule)
 
-        combined = exact + word_boundary + substring
-        return combined[: max(1, min(limit, MAX_SEARCH_LIMIT))]
+        return exact + word_boundary + substring
+
+    def _score_by_terms(self, terms: list[str], phrase: str) -> list[Rule]:
+        """Rank rules by the rarity of the query terms they contain.
+
+        A term is weighted by inverse document frequency, which is what stops a
+        word like "creature" -- in 567 of the 3047 rules -- from outvoting the
+        one term that actually discriminates. Covering more terms scores higher
+        by construction, since the score is the sum over matched terms.
+
+        Ordering matters as much as matching here: the previous implementation
+        appended matches in dictionary order, which is document order, so rules
+        from late sections were structurally last. Rule 903.8 came back 76th of
+        88 for "command zone" purely because Commander is at the end of the book.
+        """
+        matched_terms: dict[str, list[str]] = {}
+        doc_freq: dict[str, int] = dict.fromkeys(terms, 0)
+
+        for number, rule in self._rules.items():
+            text_lower = rule.text.lower()
+            hits = [term for term in terms if term in text_lower]
+            if not hits:
+                continue
+            matched_terms[number] = hits
+            for term in hits:
+                doc_freq[term] += 1
+
+        if not matched_terms:
+            return []
+
+        total = len(self._rules)
+        weight = {term: math.log(total / (1 + doc_freq[term])) for term in terms}
+
+        scores: dict[str, float] = {}
+        for number, hits in matched_terms.items():
+            text_lower = self._rules[number].text.lower()
+            score = sum(weight[term] for term in hits)
+            # A rule using the term as a whole word is about the term; one that
+            # merely contains its letters ("counter" inside "encounter") is not.
+            score += sum(
+                weight[term] * 0.25
+                for term in hits
+                if re.search(r"\b" + re.escape(term) + r"\b", text_lower)
+            )
+            # The verbatim phrase is a stronger signal than its separate words.
+            if phrase in text_lower:
+                score *= 2.0
+            scores[number] = score
+
+        ranked = sorted(scores, key=lambda n: (-scores[n], n))
+        return [self._rules[number] for number in ranked]
 
     async def glossary_lookup(self, term: str) -> GlossaryEntry | None:
         """Look up a glossary term. Case-insensitive exact match."""

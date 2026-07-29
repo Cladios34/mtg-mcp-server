@@ -438,18 +438,20 @@ async def test_every_annotated_rule_exists_in_the_corpus():
 async def test_rules_recall_does_not_regress():
     """Floor on retrieval recall, measured 2026-07-29 — not a target.
 
-    Baseline on the 30-question set: 9/30 questions put an expected rule in the
-    top 5, and 14/30 never returned it at all. Split by phrasing, 8/17 for
-    questions naming a glossary term against 1/13 for questions phrased in plain
-    language.
+    First baseline, word-by-word search: 9/30 in the top 5, 14/30 never returned
+    at all, 8/17 named against 1/13 plain.
 
-    The dominant failure is not ranking. ``keyword_search`` matches literal
-    substrings, so "commander damage" returns nothing at all while rule 903.10a
-    sits in the corpus saying "combat damage by the same commander"; and rules
-    that do match often rank below the per-term cutoff (903.8 is 76th of 88 for
-    "command zone"), so they never become candidates for ranking in the first
-    place. These numbers exist to catch a regression, and to be raised
-    deliberately when that retrieval layer is addressed.
+    After scoring the scenario's terms jointly and weighting each by inverse
+    document frequency: 17/30 in the top 5, 8/30 absent, 15/17 named against
+    2/13 plain. The named/plain gap is the real result. Retrieval was never the
+    limit for questions that name a mechanic; it is still the limit for
+    questions phrased the way a player speaks, and no amount of lexical work
+    reaches those. "My 3/3 gets -3/-3, what happens to it?" is answered by rule
+    704.5f, which says "toughness 0 or less" — a word the question does not
+    contain. That gap is what an embedding would have to close.
+
+    The floors are separate on purpose: a change that lifts the average while
+    quietly losing the plain-language cases would still pass a single number.
     """
     from mtg_mcp_server.config import Settings
     from mtg_mcp_server.services.rules import RulesService
@@ -458,11 +460,14 @@ async def test_rules_recall_does_not_regress():
     service = RulesService(rules_url=Settings().rules_url, refresh_hours=168)
     await service.ensure_loaded()
 
-    hits_at_5 = 0
+    hits_at_5 = {"named": 0, "plain": 0}
     for question in _annotated_questions()["questions"]:
         result = await rules_scenario(question["question_en"], rules=service)
         ranked = [r["number"] for r in result.data["rules"]]
         if any(number in ranked[:5] for number in question["expected_rules"]):
-            hits_at_5 += 1
+            hits_at_5[question["phrasing"]] += 1
 
-    assert hits_at_5 >= 9, f"recall@5 regressed: {hits_at_5}/30, floor is 9/30"
+    total = hits_at_5["named"] + hits_at_5["plain"]
+    assert total >= 17, f"recall@5 regressed: {total}/30, floor is 17/30"
+    assert hits_at_5["named"] >= 15, f"named recall@5 regressed: {hits_at_5['named']}/17"
+    assert hits_at_5["plain"] >= 2, f"plain recall@5 regressed: {hits_at_5['plain']}/13"
