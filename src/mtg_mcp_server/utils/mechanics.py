@@ -23,15 +23,18 @@ if TYPE_CHECKING:
     from mtg_mcp_server.types import Card
 
 __all__ = [
+    "AlternativeCost",
     "ParsedCost",
     "ReductionResult",
     "TypeMatch",
+    "alternative_cast_cost",
     "apply_generic_reduction",
     "card_keywords",
     "carries_keyword",
     "creature_types",
     "has_creature_type",
     "keyword_activation_cost",
+    "mana_value",
     "normalize_keyword",
     "parse_mana_cost",
     "reduction_amount",
@@ -296,6 +299,106 @@ def keyword_activation_cost(card: Card, keyword: str) -> str | None:
         return None
     match = _keyword_cost_pattern(keyword).search(oracle)
     return match.group(1) if match else None
+
+
+def _symbol_value(symbol: str) -> int:
+    """Mana value of a single cost symbol.
+
+    ``{X}`` is zero on the stack (rule 202.3b). A hybrid is worth the greater of
+    its halves (rule 202.3f), so ``{2/U}`` is 2: counting it as 1 would make a
+    card look cheaper than it can ever be cast for.
+    """
+    upper = symbol.upper()
+    if upper == "X":
+        return 0
+    if "/" in upper:
+        halves = [int(part) for part in upper.split("/") if part.isdigit()]
+        return max(halves) if halves else 1
+    return 1
+
+
+def mana_value(mana_cost: str | None) -> int:
+    """Mana value of a printed cost string, as an integer."""
+    parsed = parse_mana_cost(mana_cost)
+    return parsed.generic + sum(_symbol_value(s) for s in parsed.symbols)
+
+
+@dataclass(frozen=True)
+class AlternativeCost:
+    """A cheaper way to cast a card from hand than paying its printed cost."""
+
+    value: int
+    keyword: str
+    cost: str
+
+
+# Keywords that let a card be cast FROM HAND for a different mana cost, with no
+# prerequisite this module cannot see. Deliberately short: Escape, Flashback,
+# Disturb and Jump-start cast from the graveyard; Madness needs a discard;
+# Miracle needs the draw window; Foretell splits payment across two turns;
+# Bestow and Overload cost MORE. None of those answer "what can this hand cast
+# on curve", so counting them would trade one wrong number for another.
+#
+# GOTCHA(2026-07-29): Impending prints as "Impending 4—{2}{W}{W}": a counter and
+# a dash sit between the keyword and the cost, so the plain keyword-then-cost
+# pattern misses it. It is a real carrier of this bug class: Overlord of the
+# Mistmoors is a {5}{W}{W} card castable for 4. Note it enters as a NON-creature
+# until its last time counter is removed, so it is a castable spell on curve but
+# not a body on curve; the simulation measures the former.
+_ALTERNATIVE_CAST_KEYWORDS = ("Warp", "Evoke", "Impending")
+
+# Keyword, then an optional reminder counter and dash, then the mana cost.
+# The dash class carries the three Scryfall actually prints (em, en, hyphen);
+# ruff flags the literals as ambiguous, so they are spelled by code point.
+_ALTERNATIVE_COST_RE = r"{keyword}(?:\s+\d+)?\s*[—–-]?\s*((?:\{{[^}}]+\}})+)"  # noqa: RUF001
+
+
+@lru_cache(maxsize=32)
+def _alternative_cost_pattern(keyword: str) -> re.Pattern[str]:
+    """Compile (and cache) the alternative-cost pattern for a keyword.
+
+    Separate from :func:`_keyword_cost_pattern` on purpose: that one serves
+    activation costs reached from a client-controlled argument, and widening it
+    to swallow "Impending 4—" would change what every caller of it matches.
+    Bounded cache, though this one only ever sees the constants above.
+    """
+    return re.compile(_ALTERNATIVE_COST_RE.format(keyword=re.escape(keyword)), re.IGNORECASE)
+
+
+def alternative_cast_cost(card: Card) -> AlternativeCost | None:
+    """The cheapest alternative cost this card can be cast from hand for.
+
+    Returns ``None`` when the card has no such cost, when the alternative is not
+    payable in mana, or when it is not actually cheaper than the printed cost.
+
+    Two independent checks must agree before a discount is reported: the keyword
+    must appear in Scryfall's ``keywords`` field, AND a mana cost must be printed
+    immediately after it in the oracle text. Either alone produces false
+    positives: Mutalith Vortex Beast carries the keyword "Warp Vortex" (the name
+    of a triggered ability), and reminder text names keywords it does not grant.
+    Declining costs nothing: the caller falls back to the printed mana value,
+    which is what it used before this function existed.
+    """
+    printed = round(card.cmc)
+    keywords = card_keywords(card)
+    best: AlternativeCost | None = None
+
+    for keyword in _ALTERNATIVE_CAST_KEYWORDS:
+        if keyword not in keywords:
+            continue
+        match = _alternative_cost_pattern(keyword).search(card.oracle_text or "")
+        if match is None:
+            # A non-mana alternative cost (Grief's "Evoke-Exile a black card").
+            # Whether it is payable depends on the rest of the hand.
+            continue
+        cost = match.group(1)
+        value = mana_value(cost)
+        if value >= printed:
+            continue
+        if best is None or value < best.value:
+            best = AlternativeCost(value=value, keyword=keyword, cost=cost)
+
+    return best
 
 
 def creature_types(card: Card) -> set[str]:

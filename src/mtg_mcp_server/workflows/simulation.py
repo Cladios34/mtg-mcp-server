@@ -24,6 +24,7 @@ from mtg_mcp_server.utils.color_identity import parse_color_identity
 from mtg_mcp_server.utils.decklist import parse_decklist
 from mtg_mcp_server.utils.declared import CategoryResult, evaluate_categories
 from mtg_mcp_server.utils.mana import count_pips
+from mtg_mcp_server.utils.mechanics import alternative_cast_cost
 from mtg_mcp_server.workflows import WorkflowResult
 
 if TYPE_CHECKING:
@@ -266,9 +267,10 @@ _RAMP_CLASSES = frozenset({_CardClass.ROCK, _CardClass.DORK, _CardClass.RAMP_SPE
 class _Slot(NamedTuple):
     """A single deck slot reduced to only what the simulation loop needs.
 
-    The trailing ``colors``/``pips``/``is_tutor`` fields default to empty so
-    positional constructions (``_Slot(cls, cmc, prod)``) stay valid; they are
-    only populated when the color-screen or tutor-analysis features are active.
+    The trailing ``colors``/``pips``/``is_tutor``/``entry_cmc`` fields default to
+    empty so positional constructions (``_Slot(cls, cmc, prod)``) stay valid; they
+    are only populated when the color-screen, tutor-analysis, or alternative-cost
+    features are active.
     """
 
     cls: _CardClass
@@ -277,6 +279,19 @@ class _Slot(NamedTuple):
     colors: frozenset[str] = frozenset()
     pips: frozenset[str] = frozenset()
     is_tutor: bool = False
+    entry_cmc: int | None = None
+
+    @property
+    def entry(self) -> int:
+        """What this slot costs to actually cast from hand.
+
+        ``cmc`` is the printed mana value and stays the printed mana value --
+        it is what a curve is drawn from. ``entry`` is what the hand has to pay,
+        which is lower for a card with an alternative casting cost (a warp
+        creature is a turn-3 play whatever its mana value says). Every
+        castability decision reads this; nothing else should.
+        """
+        return self.cmc if self.entry_cmc is None else self.entry_cmc
 
 
 def _classify_card(
@@ -577,9 +592,12 @@ def _keep_playability(
        produces less mana on turn 3 than ``min_lands``, meaning the hand is
        too slow to develop even accounting for rocks/dorks/ramp spells.
     2. "flood" -- more effective lands than ``max_lands``.
-    3. "no_gas" -- no non-land, non-ramp card at or below ``gas_cmc_threshold``
-       mana value to actually do something with the mana. Under ``tutor_aware``,
-       a tutor at or below the threshold also counts as gas (it can find some).
+    3. "no_gas" -- no non-land card the hand can afford to cast at or below
+       ``gas_cmc_threshold``. Land-fetch ramp spells count here as well as
+       ``OTHER`` cards: a hand whose only play is a Rampant Growth still has
+       something to do with its mana. Measured on the entry cost, not the
+       printed mana value: a 9-drop that warps in for {3} is a turn-3 play.
+       Under ``tutor_aware``, a tutor at or below the threshold counts too.
     4. "colors" -- the hand cannot source every ``commander_colors`` color
        (inert when ``commander_colors`` is empty).
 
@@ -593,9 +611,9 @@ def _keep_playability(
         (
             c.cls in (_CardClass.OTHER, _CardClass.RAMP_SPELL)
             and not c.is_tutor
-            and c.cmc <= gas_cmc_threshold
+            and c.entry <= gas_cmc_threshold
         )
-        or (tutor_aware and c.is_tutor and c.cmc <= gas_cmc_threshold)
+        or (tutor_aware and c.is_tutor and c.entry <= gas_cmc_threshold)
         for c in hand
     )
     if not has_gas:
@@ -713,9 +731,9 @@ def _bottom_cards_playability(
         gas_indices = [
             i
             for i, c in enumerate(remaining)
-            if c.cls in (_CardClass.OTHER, _CardClass.RAMP_SPELL) and c.cmc <= gas_cmc_threshold
+            if c.cls in (_CardClass.OTHER, _CardClass.RAMP_SPELL) and c.entry <= gas_cmc_threshold
         ]
-        protected_idx = min(gas_indices, key=lambda i: remaining[i].cmc) if gas_indices else None
+        protected_idx = min(gas_indices, key=lambda i: remaining[i].entry) if gas_indices else None
 
         gas_like_indices = [
             i
@@ -723,7 +741,7 @@ def _bottom_cards_playability(
             if c.cls in (_CardClass.OTHER, _CardClass.RAMP_SPELL) and i != protected_idx
         ]
         if gas_like_indices:
-            idx = max(gas_like_indices, key=lambda i: remaining[i].cmc)
+            idx = max(gas_like_indices, key=lambda i: remaining[i].entry)
             bottomed.append(remaining.pop(idx))
             continue
 
@@ -731,7 +749,7 @@ def _bottom_cards_playability(
             i for i, c in enumerate(remaining) if c.cls in (_CardClass.ROCK, _CardClass.DORK)
         ]
         if ramp_indices:
-            idx = max(ramp_indices, key=lambda i: remaining[i].cmc)
+            idx = max(ramp_indices, key=lambda i: remaining[i].entry)
             bottomed.append(remaining.pop(idx))
             continue
 
@@ -795,11 +813,11 @@ def _hand_development(hand: list[_Slot], *, count_mdfc_lands: bool) -> float:
         if turn == 3:
             return float(pool)
 
-        castable = sorted((c for c in remaining if c.cls in _RAMP_CLASSES), key=lambda c: c.cmc)
+        castable = sorted((c for c in remaining if c.cls in _RAMP_CLASSES), key=lambda c: c.entry)
         for card in castable:
-            if card.cmc > pool:
+            if card.entry > pool:
                 break
-            pool -= card.cmc
+            pool -= card.entry
             remaining.remove(card)
             battlefield.append((card.cls, card.production, turn))
             if card.cls == _CardClass.ROCK:
@@ -840,11 +858,11 @@ def _goldfish(
 
         pool = _battlefield_pool(battlefield, turn)
 
-        castable = sorted((c for c in hand if c.cls in _RAMP_CLASSES), key=lambda c: c.cmc)
+        castable = sorted((c for c in hand if c.cls in _RAMP_CLASSES), key=lambda c: c.entry)
         for card in castable:
-            if card.cmc > pool:
+            if card.entry > pool:
                 break
-            pool -= card.cmc
+            pool -= card.entry
             hand.remove(card)
             battlefield.append((card.cls, card.production, turn))
             if card.cls == _CardClass.ROCK:
@@ -1028,12 +1046,12 @@ def _run_simulation(
         if tutor_aware:
             hand_tutor_total += sum(1 for c in kept_hand if c.is_tutor)
         gas_count = sum(
-            1 for c in kept_hand if c.cls is _CardClass.OTHER and c.cmc <= gas_cmc_threshold
+            1 for c in kept_hand if c.cls is _CardClass.OTHER and c.entry <= gas_cmc_threshold
         )
         hand_gas_total += gas_count
         if gas_count == 0:
             no_gas_hands += 1
-        big_count = sum(1 for c in kept_hand if c.cmc >= 6)
+        big_count = sum(1 for c in kept_hand if c.entry >= 6)
         hand_big_total += big_count
         if big_count >= 2:
             big2plus_hands += 1
@@ -1172,16 +1190,34 @@ async def simulate_opening_hands(
     card_classes: dict[str, list[str]] = {c.name: [] for c in _CardClass}
     slot_by_key: dict[str, _Slot] = {}
     tutors: list[_TutorInfo] = []
+    alternative_costs: list[dict[str, Any]] = []
     for name in dict.fromkeys(name for _, name in slots):
         key = name.lower()
         card = cards_by_name.get(key)
         is_tutor = False
+        entry_cmc: int | None = None
         if card is not None:
             cls = _classify_card(card, extra_mana_sources=extra_set, exclude_cards=exclude_set)
             cmc_int = round(card.cmc)
             display_name = card.name
             colors = _source_colors(card, cls, deck_land_colors=deck_land_colors)
             pips = frozenset(count_pips(card.mana_cost)) & _COLOR_LETTERS
+            # A card castable from hand for less than its printed cost enters
+            # play on the turn it can be paid for, not the turn its mana value
+            # suggests. Reported rather than applied silently: a keep rate that
+            # moved should be traceable to the card that moved it.
+            alternative = alternative_cast_cost(card)
+            if alternative is not None:
+                entry_cmc = alternative.value
+                alternative_costs.append(
+                    {
+                        "name": card.name,
+                        "keyword": alternative.keyword,
+                        "mana_value": cmc_int,
+                        "alternative_cost": alternative.cost,
+                        "entry_mana_value": alternative.value,
+                    }
+                )
             if tutor_aware:
                 classified = _classify_tutor(card, cls)
                 if classified is not None:
@@ -1202,7 +1238,7 @@ async def simulate_opening_hands(
             colors = frozenset()
             pips = frozenset()
         production = _mana_production(card, cls)
-        slot_by_key[key] = _Slot(cls, cmc_int, production, colors, pips, is_tutor)
+        slot_by_key[key] = _Slot(cls, cmc_int, production, colors, pips, is_tutor, entry_cmc)
         card_classes[cls.name].append(display_name)
 
     # Deck-wide colored-pip demand (quantity-weighted), computed once at
@@ -1394,6 +1430,31 @@ async def simulate_opening_hands(
             )
         lines.append("")
 
+    if alternative_costs:
+        lines.append("## Alternative Casting Costs")
+        lines.append("")
+        lines.append(
+            "These cards can be cast from hand for less than their mana value, so "
+            "castability is judged on the entry cost below, not the printed cost."
+        )
+        lines.append("")
+        lines.append("| Card | Mana Value | Alternative | Entry Cost |")
+        lines.append("|---|---|---|---|")
+        for alt in sorted(alternative_costs, key=lambda a: str(a["name"])):
+            lines.append(
+                f"| {alt['name']} | {alt['mana_value']} | {alt['keyword']} "
+                f"{alt['alternative_cost']} | {alt['entry_mana_value']} |"
+            )
+        lines.append("")
+        lines.append(
+            "- Not counted: costs paid from the graveyard (escape, flashback, disturb, "
+            "jump-start), "
+            "costs needing a discard or draw window (madness, miracle), costs split "
+            "across turns (foretell), and non-mana costs such as Grief's evoke. Those "
+            "cards keep their printed mana value here."
+        )
+        lines.append("")
+
     lines.append("## Detected Card Classes")
     lines.append("")
     for cls in (
@@ -1423,6 +1484,7 @@ async def simulate_opening_hands(
         "keep_first_deal_pct": keep_first_deal_pct,
         "keep_via_free_mulligan_pct": keep_via_free_mulligan_pct,
         "card_classes": card_classes,
+        "alternative_costs": alternative_costs,
         "tutors": [t._asdict() for t in tutors],
         "color_screen": color_screen,
         "unresolved": unresolved,
