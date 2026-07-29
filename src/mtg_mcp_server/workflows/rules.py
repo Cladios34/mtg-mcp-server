@@ -35,6 +35,23 @@ _RULE_NUMBER_RE = re.compile(r"^\d+(\.\d+[a-z]*)*$")
 # Minimum word length to try as a keyword when extracting from scenario text
 _MIN_KEYWORD_LEN = 4
 
+# Scenario ranking. A scenario names a handful of mechanics; the rules that
+# govern it are few, and burying them under everything the generic nouns matched
+# is what made this tool unusable as a check on a claim.
+_SCENARIO_PER_TERM = 40  # candidates gathered per word, before ranking
+_SCENARIO_MAX_RULES = 25  # rules actually returned, ranked
+_RRF_K = 10  # reciprocal-rank smoothing; small K sharpens the head
+_WEIGHT_GLOSSARY_TERM = 3.0  # the word names a real mechanic
+_WEIGHT_PLAIN = 1.0
+_WEIGHT_BROAD = 0.15  # the word matches most of the corpus and means nothing
+_NON_DISCRIMINATING = _SCENARIO_PER_TERM  # a full page of hits discriminates nothing
+_GLOSSARY_CITATION_BONUS = 5.0  # the glossary points at this rule for this word
+_PARENT_SHARE = 0.6  # a subrule inherits this much of its parent's relevance
+_SUBRULE_SUFFIXES = "abcdefghijklmnopqrstuvwxyz"
+
+# "see rule 702.19b" / "rule 704.5" — the corpus resolves 100% of these.
+_RULE_REFERENCE_RE = re.compile(r"\brules?\s+(\d{3}\.\d+[a-z]?)", re.IGNORECASE)
+
 # Common stop words to skip during scenario extraction
 _STOP_WORDS = frozenset(
     {
@@ -570,24 +587,65 @@ async def rules_scenario(
             seen.add(w)
             unique_candidates.append(w)
 
-    # Search rules for each candidate keyword
+    # Search rules for each candidate keyword, then RANK the union.
+    #
+    # Searching each word separately and concatenating in word order put the two
+    # rules that answered a real trample+deathtouch question at ranks 105 and 114
+    # of 368, inside a 215 KB response whose first entries were about APNAP order.
+    # Every rule was retrieved and none was ranked.
+    #
+    # Three signals decide the order, all available without a model:
+    #   - a rule found by SEVERAL words of the scenario beats one found by a
+    #     single word (rules_interaction is exactly what a scenario asks about)
+    #   - a word that is a glossary entry names a real mechanic; a word that
+    #     matches half the corpus ("creature" hits 567 of 3047 rules) names
+    #     nothing and is scored down accordingly
+    #   - a rule the glossary itself points to for that word is the definition
     all_rules: dict[str, list[Rule]] = {}
+    scores: dict[str, float] = {}
+    rules_by_number: dict[str, Rule] = {}
+
     for candidate in unique_candidates:
         try:
-            found = await rules.keyword_search(candidate)
-            if found:
-                all_rules[candidate] = found
+            found = await rules.keyword_search(candidate, limit=_SCENARIO_PER_TERM)
         except Exception:
             log.warning("rules_scenario.search_failed", keyword=candidate, exc_info=True)
+            continue
+        if not found:
+            continue
+        all_rules[candidate] = found
 
-    # Collect all unique rules (dedup by number)
-    seen_numbers: set[str] = set()
-    unique_rules: list[Rule] = []
-    for rule_list in all_rules.values():
-        for rule in rule_list:
-            if rule.number not in seen_numbers:
-                seen_numbers.add(rule.number)
-                unique_rules.append(rule)
+        glossary = await rules.glossary_lookup(candidate)
+        if len(found) >= _NON_DISCRIMINATING:
+            weight = _WEIGHT_BROAD
+        elif glossary is not None:
+            weight = _WEIGHT_GLOSSARY_TERM
+        else:
+            weight = _WEIGHT_PLAIN
+
+        # The rules a glossary entry cites are the definition of the term.
+        cited = set(_RULE_REFERENCE_RE.findall(glossary.definition)) if glossary else set()
+
+        for rank, rule in enumerate(found):
+            rules_by_number.setdefault(rule.number, rule)
+            # Reciprocal rank, so a rule near the top of several searches wins.
+            scores[rule.number] = scores.get(rule.number, 0.0) + weight / (rank + _RRF_K)
+            if rule.number in cited or any(rule.number.startswith(c) for c in cited):
+                scores[rule.number] += _GLOSSARY_CITATION_BONUS
+
+    # Hierarchical lift: a subrule whose parent ranks well is about the same
+    # mechanic and belongs next to it, even when its own wording matched nothing.
+    # 702.2b ("any nonzero amount of damage is lethal") is the rule that makes
+    # deathtouch work, but the word "deathtouch" appears in its parent, not in it.
+    for number in list(scores):
+        parent = number.rstrip(_SUBRULE_SUFFIXES)
+        if parent != number and parent in scores:
+            scores[number] += scores[parent] * _PARENT_SHARE
+
+    unique_rules = [
+        rules_by_number[number]
+        for number in sorted(scores, key=lambda n: (-scores[n], n))[:_SCENARIO_MAX_RULES]
+    ]
 
     # Build markdown
     lines: list[str] = []
@@ -603,26 +661,31 @@ async def rules_scenario(
     if not unique_rules:
         lines.append("No relevant rules found for this scenario.")
     else:
-        lines.append(f"## Relevant Rules ({len(unique_rules)} found)")
+        # Ranked, most relevant first. Grouping by keyword was what produced a
+        # 215 KB wall in scenario order: it printed every hit of every word,
+        # including the ones the ranking exists to push down.
+        total = len(scores)
+        header = f"## Relevant Rules ({len(unique_rules)} shown, most relevant first"
+        lines.append(
+            f"{header}, of {total} matched)" if total > len(unique_rules) else f"{header})"
+        )
+        lines.append("")
+        for rule in unique_rules:
+            lines.append(f"- {fmt(rule)}")
         lines.append("")
 
-        if response_format == "detailed":
-            # Group by keyword
-            for keyword, rule_list in all_rules.items():
-                lines.append(f"### {keyword.title()}")
-                lines.append("")
-                for rule in rule_list:
-                    lines.append(f"- {fmt(rule)}")
-                lines.append("")
-        else:
-            # Concise: flat list
-            for rule in unique_rules:
-                lines.append(f"- {fmt(rule)}")
+        if response_format == "detailed" and all_rules:
+            lines.append(
+                "*Terms searched: " + ", ".join(sorted(all_rules)) + ". "
+                "A term matching most of the corpus is scored down; a term the "
+                "glossary defines is scored up.*"
+            )
 
     # Build data
     data = {
         "scenario": scenario,
         "keywords_extracted": list(all_rules.keys()),
+        "rules_matched_total": len(scores),
         "rules": [slim_rule(r) for r in unique_rules],
     }
 
