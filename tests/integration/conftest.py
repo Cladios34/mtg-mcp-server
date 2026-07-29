@@ -7,6 +7,7 @@ client -> orchestrator -> provider -> service -> mocked HTTP.
 
 from __future__ import annotations
 
+import gzip
 import json
 import re
 from pathlib import Path
@@ -51,12 +52,19 @@ def _load_bulk_metadata() -> dict:
 
 def _bulk_download_url() -> str:
     """Derive the bulk download URL from the metadata fixture."""
-    return _load_bulk_metadata()["download_uri"]
+    return _load_bulk_metadata()["jsonl_download_uri"]
 
 
 def _load_oracle_cards_bytes() -> bytes:
-    """Load the oracle cards sample fixture as bytes."""
-    return (SCRYFALL_BULK_FIXTURES / "oracle_cards_sample.json").read_bytes()
+    """The oracle cards sample as gzipped JSONL -- what the live URL returns.
+
+    Served in the real wire format on purpose. Until 2026-07-29 this fixture
+    handed back a plain JSON array long after Scryfall had stopped sending one,
+    so the whole suite stayed green while every bulk-backed tool was down in
+    production. A fixture that does not match the wire proves nothing.
+    """
+    entries = json.loads((SCRYFALL_BULK_FIXTURES / "oracle_cards_sample.json").read_text())
+    return gzip.compress(b"\n".join(json.dumps(entry).encode() for entry in entries))
 
 
 @pytest.fixture
