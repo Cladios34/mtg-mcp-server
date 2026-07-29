@@ -20,11 +20,16 @@ background refresh loop via ``asyncio.create_task()``.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
+import gzip
+import io
 import json
 import random
 import time
-from typing import Self
+import zlib
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Self
 
 import httpx
 import structlog
@@ -33,6 +38,9 @@ from pydantic import ValidationError
 from mtg_mcp_server.services.base import DEFAULT_USER_AGENT, ServiceError
 from mtg_mcp_server.types import Card
 from mtg_mcp_server.utils.mechanics import has_creature_type
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 # Card types, as opposed to creature subtypes. A changeling is every creature type
 # (702.73a) but it is not an Artifact, so these never pick up changelings.
@@ -57,6 +65,11 @@ _CARD_TYPES = frozenset(
 
 __all__ = ["ScryfallBulkClient", "ScryfallBulkDownloadError", "ScryfallBulkError"]
 
+# How far a refresh may shrink the card pool before it is treated as corruption
+# rather than as Scryfall having removed cards. Real drops are a handful of
+# cards; a truncated or re-encoded payload loses most of them.
+_MIN_REFRESH_RATIO = 0.5
+
 log = structlog.get_logger(service="ScryfallBulkClient")
 
 # Scryfall Oracle Cards includes non-playable entries (minigames, art series,
@@ -72,6 +85,14 @@ _EXCLUDED_LAYOUTS: frozenset[str] = frozenset(
         "token",
     }
 )
+
+
+@dataclass
+class _ParseStats:
+    """Line counts a generator cannot return alongside the entries it yields."""
+
+    read: int = 0
+    malformed: int = 0
 
 
 class ScryfallBulkError(ServiceError):
@@ -196,12 +217,23 @@ class ScryfallBulkClient:
             log.info("scryfall_bulk.loading", base_url=self._base_url, is_refresh=is_refresh)
 
             try:
-                # Step 1: Fetch metadata to get the current download URL
+                # Step 1: Fetch metadata to get the current download URL.
+                # Scryfall renamed 'download_uri' to 'jsonl_download_uri' in
+                # July 2026 when the payload moved to gzipped JSONL. The old key
+                # is still accepted so a rollback upstream is not an outage here.
                 metadata = await self._fetch_metadata()
-                download_url = metadata.get("download_uri")
-                if not download_url or not isinstance(download_url, str):
+                download_url = next(
+                    (
+                        value
+                        for key in ("jsonl_download_uri", "download_uri")
+                        if isinstance(value := metadata.get(key), str) and value
+                    ),
+                    None,
+                )
+                if download_url is None:
                     raise ScryfallBulkError(
-                        f"Bulk metadata missing 'download_uri'. Keys: {list(metadata.keys())}"
+                        "Bulk metadata has neither 'jsonl_download_uri' nor 'download_uri'. "
+                        f"Keys: {list(metadata.keys())}"
                     )
 
                 # Step 2: Download the bulk data (with ETag if URL matches)
@@ -583,32 +615,108 @@ class ScryfallBulkClient:
         except httpx.RequestError as exc:
             raise ScryfallBulkDownloadError(f"Network error downloading bulk data: {exc}") from exc
 
-    def _parse(self, raw_bytes: bytes) -> None:
-        """Parse Oracle Cards JSON array into the in-memory card dicts.
+    @staticmethod
+    def _open_payload(raw_bytes: bytes) -> gzip.GzipFile | io.BytesIO:
+        """Return a line-readable stream over the payload, gunzipping if needed.
 
-        The bulk data is a JSON array of Scryfall card objects. Each is
-        validated through ``Card.model_validate()``.
+        Scryfall serves ``Content-Type: application/gzip`` with no
+        ``Content-Encoding`` header, so httpx does NOT decompress this for us.
+        Detection is on the gzip magic number rather than the URL suffix or the
+        content type, both of which have already changed once.
+
+        Streamed rather than decompressed in one call on purpose: the live file
+        is ~24 MB gzipped and several hundred MB expanded, and this process
+        serves production while a background refresh runs.
+        """
+        if raw_bytes.startswith(b"\x1f\x8b"):
+            return gzip.GzipFile(fileobj=io.BytesIO(raw_bytes))
+        return io.BytesIO(raw_bytes)
+
+    @classmethod
+    def _iter_entries(cls, raw_bytes: bytes, stats: _ParseStats) -> Iterator[object]:
+        """Yield card entries from the payload, JSONL first, JSON array as fallback.
+
+        Scryfall moved from a single JSON array to JSONL (one card per line) in
+        July 2026. Both are read here: the array form costs a few lines to keep
+        and means an upstream rollback does not take the server down.
+
+        A generator rather than a list on purpose. Materialising all ~35k dicts
+        before building the first Card put the peak at 803 MB against 628 MB for
+        the array path it replaced, on a process that serves production while a
+        background refresh runs. Counts land in ``stats`` because a generator
+        cannot return them alongside its values, and the caller needs them: it
+        reports "parsed N of M", and a denominator that never counted the
+        unreadable lines sends whoever reads it looking in the wrong place.
+
+        Raises:
+            ScryfallBulkError: If the payload cannot be read as either shape.
+        """
+        try:
+            with cls._open_payload(raw_bytes) as stream:
+                for raw_line in stream:
+                    line = raw_line.strip().removeprefix(codecs.BOM_UTF8)
+                    if not line:
+                        continue
+                    # A legacy JSON array: hand the whole payload to json.loads.
+                    if not stats.read and not stats.malformed and line.startswith(b"["):
+                        for entry in cls._parse_legacy_array(raw_bytes):
+                            stats.read += 1
+                            yield entry
+                        return
+                    try:
+                        entry = json.loads(line)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        # One unreadable line in ~35k must not lose the rest.
+                        stats.malformed += 1
+                        continue
+                    stats.read += 1
+                    yield entry
+        except (OSError, EOFError, zlib.error) as exc:
+            raise ScryfallBulkError(f"Failed to decompress bulk data: {exc}") from exc
+
+        if stats.malformed:
+            log.warning("scryfall_bulk.malformed_lines", count=stats.malformed)
+        if not stats.read:
+            raise ScryfallBulkError(
+                "Failed to parse bulk data: payload is neither a JSON array nor JSONL "
+                f"({stats.malformed} unreadable line(s), {len(raw_bytes)} bytes)"
+            )
+
+    @classmethod
+    def _parse_legacy_array(cls, raw_bytes: bytes) -> list[object]:
+        """Read the pre-July-2026 shape: one JSON array holding every card."""
+        with cls._open_payload(raw_bytes) as stream:
+            payload = stream.read()
+        try:
+            raw = json.loads(payload.removeprefix(codecs.BOM_UTF8))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ScryfallBulkError(f"Failed to parse bulk data: {exc}") from exc
+        if not isinstance(raw, list):
+            raise ScryfallBulkError("Bulk data is not a JSON array")
+        return raw
+
+    def _parse(self, raw_bytes: bytes) -> None:
+        """Parse the Oracle Cards payload into the in-memory card dicts.
+
+        Accepts gzipped or plain bytes, holding either JSONL (current Scryfall
+        format) or a JSON array (legacy). Each entry is validated through
+        ``Card.model_validate()``.
 
         For DFCs, ``card.name`` contains the full ``"Front // Back"`` name.
         We key lookups by both the full name and the front face name
         (``name.split(" // ")[0]``).
 
         Raises:
-            ScryfallBulkError: If JSON is malformed.
+            ScryfallBulkError: If the payload cannot be decompressed or parsed,
+                or if too little of it survived to be a usable card pool.
         """
-        try:
-            raw = json.loads(raw_bytes)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise ScryfallBulkError(f"Failed to parse bulk data: {exc}") from exc
-
-        if not isinstance(raw, list):
-            raise ScryfallBulkError("Bulk data is not a JSON array")
+        stats = _ParseStats()
 
         cards: dict[str, Card] = {}
         unique: list[Card] = []
         skipped = 0
 
-        for entry in raw:
+        for entry in self._iter_entries(raw_bytes, stats):
             if not isinstance(entry, dict):
                 skipped += 1
                 continue
@@ -642,13 +750,38 @@ class ScryfallBulkClient:
                 if front_face != full_name_lower:
                     cards[front_face] = card
 
-        if skipped:
-            log.info("scryfall_bulk.parse_summary", skipped=skipped, loaded=len(unique))
+        if skipped or stats.malformed:
+            log.info(
+                "scryfall_bulk.parse_summary",
+                skipped=skipped,
+                malformed=stats.malformed,
+                loaded=len(unique),
+            )
 
+        # The denominator counts every line the payload offered, including the
+        # ones dropped before they were ever entries. Quoting only the readable
+        # ones would say "0 of 1000" about a file whose other 29000 lines were
+        # unreadable, and send whoever reads it looking in the wrong place.
+        offered = stats.read + stats.malformed
         if not unique:
             raise ScryfallBulkError(
-                f"Parsed 0 cards from {len(raw)} entries ({skipped} skipped). "
+                f"Parsed 0 cards from {offered} lines "
+                f"({stats.malformed} unreadable, {skipped} skipped). "
                 "Scryfall bulk data schema may have changed."
+            )
+
+        # A payload that parses but is mostly rubbish is the dangerous case: the
+        # pool silently shrinks and every downstream tool answers "card not
+        # found" with total confidence. Measured against the pool we already
+        # had rather than an absolute floor, because only the running server
+        # knows what a normal size looks like. Raising here keeps the last good
+        # data (ensure_loaded serves stale on refresh failure).
+        previous = len(self._unique_cards)
+        if previous and len(unique) < previous * _MIN_REFRESH_RATIO:
+            raise ScryfallBulkError(
+                f"Refresh parsed {len(unique)} cards, down from {previous} "
+                f"({stats.malformed} unreadable, {skipped} skipped of {offered} lines). "
+                "Refusing to replace a healthy card pool with a truncated one."
             )
 
         self._cards = cards

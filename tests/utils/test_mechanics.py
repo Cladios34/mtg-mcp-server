@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from mtg_mcp_server.types import Card
 from mtg_mcp_server.utils.mechanics import (
+    AlternativeCost,
+    alternative_cast_cost,
     apply_generic_reduction,
     creature_types,
     has_creature_type,
@@ -310,3 +312,146 @@ class TestAmbiguousReduction:
         card = _card(name="Plain Bear", oracle_text="Trample")
         assert reduction_amount(card) is None
         assert has_reduction_clause(card) is False
+
+
+# ---------------------------------------------------------------------------
+# Alternative casting costs
+# ---------------------------------------------------------------------------
+
+
+class TestAlternativeCastCost:
+    """A card's mana value is not always what it costs to get it onto the board.
+
+    Origin (2026-07-29): the opening-hand simulator judged castability on mana
+    value alone, so a 9/9 with ``Warp {3}`` read as a 9-drop and the hands
+    holding it were mulliganed as having no castable spell. 1280 hands in 10000
+    were thrown away for holding a turn-3 play.
+    """
+
+    def test_warp_cost_beats_mana_value(self) -> None:
+        # Bygone Colossus: {9} on the card, playable on turn 3 for {3}.
+        card = _card(
+            name="Bygone Colossus",
+            type_line="Artifact Creature — Robot",
+            mana_cost="{9}",
+            cmc=9.0,
+            keywords=["Warp"],
+            oracle_text=(
+                "Warp {3} (You may cast this card from your hand for its warp cost. "
+                "Exile this creature at the beginning of the next end step, then you "
+                "may cast it from exile on a later turn.)"
+            ),
+        )
+        assert alternative_cast_cost(card) == AlternativeCost(value=3, keyword="Warp", cost="{3}")
+
+    def test_evoke_cost_beats_mana_value(self) -> None:
+        card = _card(
+            name="Mulldrifter",
+            type_line="Creature — Elemental",
+            mana_cost="{4}{U}",
+            cmc=5.0,
+            keywords=["Flying", "Evoke"],
+            oracle_text=(
+                "Flying\nWhen this creature enters, draw two cards.\n"
+                "Evoke {2}{U} (You may cast this spell for its evoke cost. If you do, "
+                "it's sacrificed when it enters.)"
+            ),
+        )
+        assert alternative_cast_cost(card) == AlternativeCost(
+            value=3, keyword="Evoke", cost="{2}{U}"
+        )
+
+    def test_impending_cost_survives_its_counter_and_dash(self) -> None:
+        # Impending prints as "Impending 4-{2}{W}{W}": a counter and a dash sit
+        # between the keyword and the cost, which a plain keyword-then-cost
+        # pattern walks straight past. Overlord of the Mistmoors is a {5}{W}{W}
+        # card castable for 4.
+        card = _card(
+            name="Overlord of the Mistmoors",
+            type_line="Enchantment Creature — Horror",
+            mana_cost="{5}{W}{W}",
+            cmc=7.0,
+            keywords=["Impending"],
+            oracle_text=(
+                "Impending 4—{2}{W}{W} (If you cast this spell for its impending cost, it "
+                "enters with four time counters and isn't a creature until the last is "
+                "removed.)"
+            ),
+        )
+        assert alternative_cast_cost(card) == AlternativeCost(
+            value=4, keyword="Impending", cost="{2}{W}{W}"
+        )
+
+    def test_ability_named_after_the_keyword_is_not_a_cost(self) -> None:
+        # Mutalith Vortex Beast's keyword is "Warp Vortex" -- the name of a
+        # triggered ability, not the Warp keyword. Reading it as a discount
+        # would make a 6-drop look like a turn-1 play.
+        card = _card(
+            name="Mutalith Vortex Beast",
+            type_line="Creature — Beast",
+            mana_cost="{4}{U}{R}",
+            cmc=6.0,
+            keywords=["Warp Vortex", "Trample"],
+            oracle_text=(
+                "Trample\nWarp Vortex — When this creature enters, flip a coin for each "
+                "opponent you have. For each flip you win, draw a card. For each flip you "
+                "lose, this creature deals 3 damage to that player."
+            ),
+        )
+        assert alternative_cast_cost(card) is None
+
+    def test_non_mana_alternative_cost_is_not_a_discount(self) -> None:
+        # Grief's evoke cost is "exile a black card", not mana. Whether it is
+        # payable depends on the rest of the hand, which this function cannot
+        # see -- so it declines rather than guesses.
+        card = _card(
+            name="Grief",
+            type_line="Creature — Elemental Incarnation",
+            mana_cost="{2}{B}{B}",
+            cmc=4.0,
+            keywords=["Evoke", "Menace"],
+            oracle_text=(
+                "Menace\nWhen this creature enters, target opponent reveals their hand. "
+                "You choose a nonland card from it. That player discards that card.\n"
+                "Evoke—Exile a black card from your hand."
+            ),
+        )
+        assert alternative_cast_cost(card) is None
+
+    def test_alternative_costing_more_is_ignored(self) -> None:
+        card = _card(
+            name="Expensive Option",
+            mana_cost="{1}{U}",
+            cmc=2.0,
+            keywords=["Warp"],
+            oracle_text="Warp {6}{U}{U}",
+        )
+        assert alternative_cast_cost(card) is None
+
+    def test_plain_card_has_no_alternative(self) -> None:
+        card = _card(name="Plain Bear", mana_cost="{1}{G}", cmc=2.0, oracle_text="Trample")
+        assert alternative_cast_cost(card) is None
+
+    def test_keyword_absent_from_scryfall_keywords_is_declined(self) -> None:
+        # The oracle text alone is not enough: reminder text and ability names
+        # both mention keywords they do not grant.
+        card = _card(
+            name="Talks About Warp",
+            mana_cost="{5}",
+            cmc=5.0,
+            keywords=[],
+            oracle_text="Whenever an opponent casts a spell with Warp {2}, draw a card.",
+        )
+        assert alternative_cast_cost(card) is None
+
+    def test_x_in_alternative_cost_counts_as_zero(self) -> None:
+        card = _card(
+            name="X Warper",
+            mana_cost="{7}",
+            cmc=7.0,
+            keywords=["Warp"],
+            oracle_text="Warp {X}{R}",
+        )
+        assert alternative_cast_cost(card) == AlternativeCost(
+            value=1, keyword="Warp", cost="{X}{R}"
+        )

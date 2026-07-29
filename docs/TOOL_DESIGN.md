@@ -735,6 +735,28 @@ Apply a cost reducer to a set of costs mechanically, and name what it does NOT r
 | Annotations | readOnly=true, idempotent=true, openWorld=true |
 | Origin | Rule 601.2f applied by hand produced two wrong numbers on the same card, in opposite directions. |
 
+### `hand_probability`
+Exact hypergeometric odds of seeing a card category, measured against the actual list.
+
+| Field | Detail |
+|-------|--------|
+| Input | `deck_size: int = 99`, `copies: int = 1`, `cards_seen: int = 7`, `min_count: int = 1`, `max_count: int \| None`, `decklist: list[str] \| None`, `category_filter: str \| None` |
+| Output | PMF table plus the requested cumulative probability. When `decklist` and `category_filter` are given, `copies` is COUNTED from the list and a `copies` argument that disagrees is reported as drift, never silently honoured |
+| Backends | Bulk data (optional) + Scryfall (optional, for `decklist` resolution) |
+| Annotations | readOnly=true, idempotent=true, openWorld=true |
+
+### `simulate_opening_hands`
+Monte Carlo goldfish of opening hands: keep rates, land distribution, mana by turn.
+
+| Field | Detail |
+|-------|--------|
+| Input | `decklist: list[str]`, `iterations: int = 10000` (100-100000), `seed: int \| None`, `min_lands: int = 2`, `max_lands: int = 5`, `keep_rule: "playability" \| "lands_v1" = "playability"`, `free_mulligan: bool = True`, `gas_cmc_threshold: int = 4`, `commander_colors: str \| None`, `tutor_aware: bool = False` |
+| Output | Keep rates by hand size and by mulligan count, mulligan reasons, kept-hand land distribution, average spendable mana and on-curve rate per turn, hand composition, detected card classes, and `alternative_costs` |
+| Backends | Bulk data (optional) + Scryfall (required, fallback resolution) |
+| Annotations | readOnly=true, idempotent=true, openWorld=true |
+
+**`alternative_costs`** lists every card the deck runs that can be cast from hand for less than its mana value (`name`, `keyword`, `mana_value`, `alternative_cost`, `entry_mana_value`), with a matching markdown section. Castability throughout the simulation is judged on that entry cost, not the printed cost: a 9-drop with `Warp {3}` is a turn-3 play, and counting it as a 9-drop mulliganed away hands that were keepable. Covers Warp, Evoke and Impending. Not covered, and kept at printed cost: costs paid from the graveyard (escape, flashback, disturb, jump-start), costs needing a discard or draw window (madness, miracle), costs split across turns (foretell), and non-mana costs such as Grief's evoke.
+
 ---
 
 ## Rules Engine Tools (orchestrator, no namespace)

@@ -94,6 +94,7 @@ def _make_card(
     cmc: float = 3.0,
     oracle_text: str | None = None,
     produced_mana: list[str] | None = None,
+    keywords: list[str] | None = None,
 ) -> Card:
     return Card(
         id="test-id-" + name.lower().replace(" ", "-").replace(",", ""),
@@ -103,6 +104,7 @@ def _make_card(
         type_line=type_line,
         oracle_text=oracle_text,
         produced_mana=produced_mana or [],
+        keywords=keywords or [],
         prices=CardPrices(usd="1.00"),
         rarity="common",
     )
@@ -1184,3 +1186,108 @@ class TestBatchResolution:
         assert result.data["unresolved"] == ["Zzzz Not A Card"]
         assert scryfall.get_cards_collection.await_count == 1
         assert scryfall.get_card_by_name.await_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Alternative casting costs (warp, evoke)
+# ---------------------------------------------------------------------------
+
+BYGONE_COLOSSUS = _make_card(
+    "Bygone Colossus",
+    type_line="Artifact Creature - Robot",
+    mana_cost="{9}",
+    cmc=9.0,
+    keywords=["Warp"],
+    oracle_text=(
+        "Warp {3} (You may cast this card from your hand for its warp cost. Exile this "
+        "creature at the beginning of the next end step, then you may cast it from exile "
+        "on a later turn.)"
+    ),
+)
+
+
+# Captured from the engine BEFORE the entry-cost plumbing landed, same seed.
+_PLAIN_DECK_KEEP_BASELINE = {7: 0.952, 6: 0.04, 5: 0.005, 4: 0.003}
+_PLAIN_DECK_MULL_BASELINE = {"screw": 247, "flood": 8, "no_gas": 0, "colors": 0}
+
+
+def _warp_deck() -> tuple[list[str], dict[str, Card]]:
+    """36 Forests + 63 copies of a 9-drop that warps in for {3}."""
+    decklist = ["36x Forest", "63x Bygone Colossus"]
+    cards = {"forest": FOREST, "bygone colossus": BYGONE_COLOSSUS}
+    return decklist, cards
+
+
+class TestAlternativeCastCostsInSimulation:
+    """A card castable from hand for less than its mana value is castable.
+
+    Origin (2026-07-29): every hand holding Bygone Colossus was read as holding a
+    9-drop and mulliganed for "no_gas", though the card is a turn-3 play. The
+    simulator reported 12.8 points of unplayable hands that were in fact keepable.
+    """
+
+    async def test_warp_creature_counts_as_castable_gas(self):
+        decklist, cards = _warp_deck()
+        result = await simulate_opening_hands(
+            decklist,
+            iterations=2000,
+            seed=7,
+            bulk=_make_bulk(cards),
+            scryfall=_make_scryfall(cards),
+        )
+        # Printed mana value 9 is above every sane gas threshold; the warp cost
+        # of 3 is not. Before the fix this was the dominant mulligan reason.
+        assert result.data["mull_reasons"]["no_gas"] == 0
+
+    async def test_warp_cost_is_reported_not_silently_applied(self):
+        decklist, cards = _warp_deck()
+        result = await simulate_opening_hands(
+            decklist,
+            iterations=200,
+            seed=7,
+            bulk=_make_bulk(cards),
+            scryfall=_make_scryfall(cards),
+        )
+        alternatives = result.data["alternative_costs"]
+        assert alternatives == [
+            {
+                "name": "Bygone Colossus",
+                "keyword": "Warp",
+                "mana_value": 9,
+                "alternative_cost": "{3}",
+                "entry_mana_value": 3,
+            }
+        ]
+        assert "Warp {3}" in result.markdown
+
+    async def test_deck_without_alternatives_reports_none(self):
+        cards = {"forest": FOREST}
+        cards.update(_bear_cards(63))
+        result = await simulate_opening_hands(
+            _basic_deck(),
+            iterations=200,
+            seed=7,
+            bulk=_make_bulk(cards),
+            scryfall=_make_scryfall(cards),
+        )
+        assert result.data["alternative_costs"] == []
+
+    async def test_plain_deck_measurements_are_unchanged(self):
+        """Regression guard: decks with no alternative cost must be bit-identical.
+
+        The entry-cost plumbing touches every castability decision in the engine.
+        If it moved a number on a deck that has no alternative costs at all, the
+        plumbing is wrong.
+        """
+        cards = {"forest": FOREST}
+        cards.update(_bear_cards(63))
+        result = await simulate_opening_hands(
+            _basic_deck(),
+            iterations=1000,
+            seed=42,
+            bulk=_make_bulk(cards),
+            scryfall=_make_scryfall(cards),
+        )
+        # Values captured from the pre-fix engine on the same seed.
+        assert result.data["keep_pct_by_hand_size"] == _PLAIN_DECK_KEEP_BASELINE
+        assert result.data["mull_reasons"] == _PLAIN_DECK_MULL_BASELINE

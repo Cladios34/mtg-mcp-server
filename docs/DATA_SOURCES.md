@@ -27,7 +27,7 @@ These have official or well-documented REST APIs with clear access patterns.
 | | |
 |---|---|
 | **URL** | Discovered via `https://api.scryfall.com/bulk-data` (Oracle Cards type) |
-| **What it has** | Every unique card as a JSON array — same shape as Scryfall API responses. Includes oracle text, types, colors, mana costs, legalities, prices (USD/EUR/foil), images, EDHREC rank, keywords. |
+| **What it has** | Every unique card, one JSON object per line (JSONL), same shape as Scryfall API responses. Includes oracle text, types, colors, mana costs, legalities, prices (USD/EUR/foil), images, EDHREC rank, keywords. |
 | **Auth** | None. Public downloads. |
 | **Access method** | JSON file download (~30MB). Parsed into in-memory dict for O(1) lookups. |
 | **Rate limit** | N/A (file download). |

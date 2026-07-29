@@ -208,6 +208,7 @@ mtg-mcp/
 │           ├── pricing.py          # price_comparison
 │           ├── mechanic_map.py     # deck_mechanic_map — shared mechanics, tribal counts, trigger reach
 │           ├── cost_reduction.py   # cost_reduction_check — what a reducer actually reduces
+│           ├── simulation.py       # hand_probability, simulate_opening_hands
 │           ├── rules.py            # rules_lookup, keyword_explain, rules_interaction, rules_scenario, combat_calculator
 │           └── card_resolver.py    # Bulk-data-first card resolution with Scryfall fallback
 │
