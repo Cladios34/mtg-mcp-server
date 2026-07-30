@@ -438,3 +438,82 @@ class TestToolRegistration:
             "set_info",
             "whats_new",
         }
+
+
+class TestUnreleasedCardsWarning:
+    """A legality filter hides unreleased cards; the response must say which ones.
+
+    Regression origin (2026-07-30): searching `id<=rwb t:angel f:commander year>=2025`
+    for a Kaalia deck returned 5 Angels and looked exhaustive (`has_more: false`).
+    Darksteel Angel was missing — real, spoiled, an Angel — because its set releases
+    2026-10-02 and Scryfall marks unreleased printings not_legal in every format. The
+    user caught it; nothing in the response could have.
+    """
+
+    @staticmethod
+    def _route(main: dict, probe_response):
+        """Dispatch on the query itself: the probe is the one carrying `date>`."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "date>" in request.url.params.get("q", ""):
+                if isinstance(probe_response, Exception):
+                    raise probe_response
+                return probe_response
+            return httpx.Response(200, json=main)
+
+        return handler
+
+    @respx.mock
+    async def test_warning_names_the_hidden_card(self, client: Client):
+        main = _load_fixture("search_sultai_commander.json")
+        hidden = {
+            **main,
+            "data": [{**main["data"][0], "name": "Darksteel Angel"}],
+            "total_cards": 1,
+            "has_more": False,
+        }
+        respx.get(f"{BASE_URL}/cards/search").mock(
+            side_effect=self._route(main, httpx.Response(200, json=hidden))
+        )
+
+        result = await client.call_tool("search_cards", {"query": "t:angel f:commander"})
+
+        text = result.content[0].text
+        assert "Darksteel Angel" in text
+        assert "not_legal" in text
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert sc["legality_filter_detected"] is True
+        assert sc["unreleased_excluded"] == ["Darksteel Angel"]
+
+    @respx.mock
+    async def test_no_probe_without_a_legality_filter(self, client: Client):
+        """No legality term means nothing was hidden on that count, and no extra call."""
+        fixture = _load_fixture("search_sultai_commander.json")
+        route = respx.get(f"{BASE_URL}/cards/search").mock(
+            return_value=httpx.Response(200, json=fixture)
+        )
+
+        result = await client.call_tool("search_cards", {"query": "t:angel year>=2025"})
+
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert sc["legality_filter_detected"] is False
+        # None, not []: no probe ran, so we make no claim about what is unreleased.
+        assert sc["unreleased_excluded"] is None
+        assert route.call_count == 1
+
+    @respx.mock
+    async def test_failed_probe_never_breaks_a_successful_search(self, client: Client):
+        """The warning is a bonus; losing it must never cost the caller their results."""
+        main = _load_fixture("search_sultai_commander.json")
+        respx.get(f"{BASE_URL}/cards/search").mock(
+            side_effect=self._route(main, httpx.ConnectError("probe exploded"))
+        )
+
+        result = await client.call_tool("search_cards", {"query": "t:angel f:commander"})
+
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert sc["total_cards"] == 9273
+        assert sc["unreleased_excluded"] == []

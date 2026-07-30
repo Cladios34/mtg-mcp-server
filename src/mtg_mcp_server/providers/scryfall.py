@@ -24,7 +24,13 @@ from mtg_mcp_server.providers import (
 )
 from mtg_mcp_server.services.scryfall import CardNotFoundError, ScryfallClient, ScryfallError
 from mtg_mcp_server.utils.formatters import ResponseFormat, format_card_detail, format_card_line
-from mtg_mcp_server.utils.query_sanitize import escaping_warning, normalize_query
+from mtg_mcp_server.utils.query_sanitize import (
+    escaping_warning,
+    has_legality_filter,
+    normalize_query,
+    unreleased_probe_query,
+    unreleased_warning,
+)
 from mtg_mcp_server.utils.slim import slim_card
 from mtg_mcp_server.utils.triggers import derive_trigger
 
@@ -112,7 +118,17 @@ async def search_cards(
     showing = len(cards)
     total = len(result.data)
 
+    # A legality filter hides everything from unreleased sets. Say WHICH cards, by name:
+    # the caller cannot act on a count, and a generic caveat stops being read.
+    legality_filtered = has_legality_filter(sent_query)
+    unreleased: list[str] | None = None
+    probe = unreleased_probe_query(sent_query, date.today().isoformat())
+    if legality_filtered and probe is not None:
+        unreleased = await _probe_unreleased(client, probe)
+
     lines = [f"Found {result.total_cards} cards (showing {showing} of {total}, page {page}):"]
+    if unreleased:
+        lines.insert(0, unreleased_warning(unreleased, probe or ""))
     if was_escaped:
         lines.insert(0, escaping_warning(query, sent_query))
     for card in cards:
@@ -132,6 +148,11 @@ async def search_cards(
             "query_sent": sent_query,
             "query_received": query,
             "query_was_escaped": was_escaped,
+            # `unreleased_excluded` is None when no probe ran (no legality filter, so
+            # nothing was hidden on that count) and a list — possibly empty — when one
+            # did. None and [] are NOT the same claim: only [] means "checked, nothing".
+            "legality_filter_detected": legality_filtered,
+            "unreleased_excluded": unreleased,
             "total_cards": result.total_cards,
             "page": page,
             "has_more": result.has_more,
@@ -140,6 +161,26 @@ async def search_cards(
             "cards": [slim_card(card) for card in cards],
         },
     )
+
+
+async def _probe_unreleased(client: ScryfallClient, probe: str) -> list[str]:
+    """Names matching `probe` (the query minus its legality filter, dated to the future).
+
+    Best-effort by design: this is a warning path, so a probe that fails must never
+    take down a search that succeeded. Zero matches and a failed probe both yield [].
+
+    GOTCHA(2026-07-30): the catch is deliberately broad. Catching only the two Scryfall
+    exceptions was not enough — anything the client does not wrap (a transport error, a
+    validation error on an odd payload) escaped and killed a search that had ALREADY
+    succeeded, turning a nice-to-have warning into an outage. Caught by the existing
+    provider tests on the very first run.
+    """
+    try:
+        found = await client.search_cards(probe, page=1)
+    except Exception as exc:
+        log.debug("unreleased_probe_failed", probe=probe, error=str(exc))
+        return []
+    return [card.name for card in found.data]
 
 
 @scryfall_mcp.tool(annotations=TOOL_ANNOTATIONS, tags=TAGS_LOOKUP)

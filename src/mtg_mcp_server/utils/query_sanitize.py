@@ -97,3 +97,66 @@ def looks_like_scryfall_syntax(query: str) -> bool:
     evidence of absence rather than as a wrong-tool error.
     """
     return bool(_SCRYFALL_SYNTAX.search(query))
+
+
+# A legality filter, in every spelling Scryfall accepts, negated form included.
+# GOTCHA(2026-07-30): Scryfall marks a card `not_legal` in EVERY format until its set's
+# release day, so `f:commander` silently drops spoiled cards from sets that are already
+# previewed. A discovery search that carries this filter therefore cannot see anything
+# upcoming, and nothing in the response says so.
+_LEGALITY_FILTER = re.compile(
+    r"(?:^|\s)-?(?:f|format|legal|banned|restricted):\S+",
+    re.IGNORECASE,
+)
+
+# Never legal in Commander at any point, so their absence is not a release-date artefact
+# and flagging them as "coming soon" would be a lie: joke sets and Arena-only printings.
+_NEVER_PAPER_LEGAL = "-is:funny -is:digital"
+
+
+def has_legality_filter(query: str) -> bool:
+    """True when the query constrains format legality (``f:``, ``legal:``, ``banned:``...)."""
+    return bool(_LEGALITY_FILTER.search(query))
+
+
+def strip_legality_filter(query: str) -> str:
+    """Return the query with every legality term removed, whitespace normalised.
+
+    Used to build the probe that counts what the legality filter is hiding. Returns an
+    empty string when legality was the only thing the query asked for.
+    """
+    return " ".join(_LEGALITY_FILTER.sub(" ", query).split())
+
+
+def unreleased_probe_query(query: str, today: str) -> str | None:
+    """Build the query that finds what a legality filter excludes, or None if moot.
+
+    ``today`` is an ISO date; ``date>today`` is what actually isolates unreleased
+    printings. ``is:spoiler`` does NOT: on Scryfall it means "this printing was
+    previewed before its release", which is true of nearly every modern card
+    (measured 2026-07-30: `id<=rwb t:angel is:spoiler` returns 241 cards, including
+    Angel of Despair and Akroma).
+    """
+    rest = strip_legality_filter(query)
+    if not rest:
+        return None
+    return f"{rest} date>{today} {_NEVER_PAPER_LEGAL}"
+
+
+def unreleased_warning(names: list[str], probe: str, shown: int = 10) -> str:
+    """Build the warning naming the cards a legality filter is hiding.
+
+    The names matter more than the count. A generic "beware of legality filters" reads
+    once and then goes invisible; a named card the caller expected to see does not.
+    """
+    listed = ", ".join(names[:shown])
+    overflow = f" (+{len(names) - shown} more)" if len(names) > shown else ""
+    return (
+        f"NOTE: your query filters on legality, which EXCLUDES cards from sets that "
+        f"have not been released yet — Scryfall marks those not_legal in every format "
+        f"until release day. {len(names)} such card(s) match the rest of your query: "
+        f"{listed}{overflow}. "
+        f"If you are exploring what EXISTS rather than what is playable today, drop the "
+        f"legality term and use `{_NEVER_PAPER_LEGAL}` instead. "
+        f"Probe used: {probe!r}"
+    )

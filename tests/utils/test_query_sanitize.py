@@ -10,8 +10,12 @@ from __future__ import annotations
 
 from mtg_mcp_server.utils.query_sanitize import (
     escaping_warning,
+    has_legality_filter,
     looks_like_scryfall_syntax,
     normalize_query,
+    strip_legality_filter,
+    unreleased_probe_query,
+    unreleased_warning,
 )
 
 # ---------------------------------------------------------------------------
@@ -133,3 +137,86 @@ class TestScryfallSyntaxDetection:
 
     def test_oracle_phrase_is_not_flagged(self) -> None:
         assert looks_like_scryfall_syntax("deals combat damage to a player") is False
+
+
+# ---------------------------------------------------------------------------
+# Legality filters hide unreleased cards
+# ---------------------------------------------------------------------------
+
+
+class TestLegalityFilterDetection:
+    """Regression origin (2026-07-30): `f:commander` silently dropped Darksteel Angel.
+
+    The card is real, spoiled, and an Angel — but its set (Reality Fracture Commander)
+    releases 2026-10-02, so Scryfall marks it not_legal everywhere and the legality
+    filter removed it with nothing in the response saying so.
+    """
+
+    def test_f_is_detected(self) -> None:
+        assert has_legality_filter("id<=rwb t:angel f:commander") is True
+
+    def test_long_form_format_is_detected(self) -> None:
+        assert has_legality_filter("t:angel format:commander") is True
+
+    def test_legal_banned_restricted_are_detected(self) -> None:
+        assert has_legality_filter("legal:modern") is True
+        assert has_legality_filter("banned:commander") is True
+        assert has_legality_filter("restricted:vintage") is True
+
+    def test_negated_filter_is_detected(self) -> None:
+        assert has_legality_filter("t:angel -f:commander") is True
+
+    def test_query_without_legality_is_not_flagged(self) -> None:
+        assert has_legality_filter("id<=rwb t:angel year>=2025 -is:reprint") is False
+
+    def test_oracle_text_mentioning_format_is_not_flagged(self) -> None:
+        assert has_legality_filter('o:"legendary creature"') is False
+
+
+class TestStripLegalityFilter:
+    def test_filter_is_removed_and_whitespace_normalised(self) -> None:
+        assert (
+            strip_legality_filter("id<=rwb t:angel f:commander year>=2025")
+            == "id<=rwb t:angel year>=2025"
+        )
+
+    def test_negated_filter_is_removed(self) -> None:
+        assert strip_legality_filter("t:angel -f:commander") == "t:angel"
+
+    def test_legality_only_query_becomes_empty(self) -> None:
+        assert strip_legality_filter("f:commander") == ""
+
+
+class TestUnreleasedProbeQuery:
+    def test_probe_swaps_legality_for_a_future_date(self) -> None:
+        probe = unreleased_probe_query("id<=rwb t:angel f:commander", "2026-07-30")
+        assert probe == "id<=rwb t:angel date>2026-07-30 -is:funny -is:digital"
+
+    def test_probe_excludes_never_legal_printings(self) -> None:
+        # Joke sets and Arena-only cards are absent for reasons that have nothing to do
+        # with a release date; flagging them as "coming soon" would be a false promise.
+        probe = unreleased_probe_query("t:dragon f:commander", "2026-07-30")
+        assert probe is not None
+        assert "-is:funny" in probe
+        assert "-is:digital" in probe
+
+    def test_no_probe_when_legality_was_the_whole_query(self) -> None:
+        assert unreleased_probe_query("f:commander", "2026-07-30") is None
+
+
+class TestUnreleasedWarning:
+    def test_warning_names_the_hidden_cards(self) -> None:
+        message = unreleased_warning(["Darksteel Angel"], "t:angel date>2026-07-30")
+        assert "Darksteel Angel" in message
+        assert "not_legal" in message
+
+    def test_warning_reports_the_probe_so_the_claim_is_checkable(self) -> None:
+        message = unreleased_warning(["Smaug, Wicked Worm"], "t:dragon date>2026-07-30")
+        assert "t:dragon date>2026-07-30" in message
+
+    def test_long_lists_are_truncated_but_counted(self) -> None:
+        names = [f"Card {i}" for i in range(15)]
+        message = unreleased_warning(names, "probe", shown=10)
+        assert "Card 0" in message
+        assert "+5 more" in message
+        assert "15 such card(s)" in message
