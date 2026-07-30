@@ -381,11 +381,13 @@ class TestToolSchemaCompleteness:
         tools = await mcp_client.list_tools()
         tool_names = sorted(t.name for t in tools)
         # 71 -> 72 with deck_audit_bundle (2026-07-24); 72 -> 74 with deck_mechanic_map
-        # and cost_reduction_check (2026-07-28). When adding a tool, update BOTH this
-        # count and its twin in tests/integration/test_orchestrator_e2e.py.
-        assert len(tools) == 74, f"Expected 74 tools, got {len(tools)}.\nTools: {tool_names}"
+        # and cost_reduction_check (2026-07-28); 74 -> 75 with deck_rules_map (2026-07-30).
+        # When adding a tool, update BOTH this count and its twin in
+        # tests/integration/test_orchestrator_e2e.py.
+        assert len(tools) == 75, f"Expected 75 tools, got {len(tools)}.\nTools: {tool_names}"
         assert "deck_audit_bundle" in tool_names
         assert "deck_mechanic_map" in tool_names
+        assert "deck_rules_map" in tool_names
         assert "cost_reduction_check" in tool_names
 
     async def test_no_context_parameter_exposed(self, mcp_client: Client):

@@ -210,6 +210,7 @@ mtg-mcp/
 │           ├── cost_reduction.py   # cost_reduction_check — what a reducer actually reduces
 │           ├── simulation.py       # hand_probability, simulate_opening_hands
 │           ├── rules.py            # rules_lookup, keyword_explain, rules_interaction, rules_scenario, combat_calculator
+│           ├── rules_deck.py       # deck_rules_map — the rules governing a decklist's mechanics
 │           └── card_resolver.py    # Bulk-data-first card resolution with Scryfall fallback
 │
 ├── tests/
@@ -751,6 +752,8 @@ mise run check    # Runs lint + typecheck + test — all must pass
 | Substring vs filter syntax | `bulk_card_search` refuses Scryfall filter syntax | It matches plain substrings; handed `t:creature mv<=2` it would return an empty set that looks like absence. Refusing loudly beats returning nothing |
 | Changelings in type search | Included by default in `search_by_type` | Rule 702.73a makes a changeling every creature type, but its type line says "Shapeshifter". A literal type-line match silently undercounts every tribal deck. Opt out with `include_changelings=False` |
 | Mechanic-indexed analysis | `deck_mechanic_map` | All other tools are card-indexed, so card-by-card analysis is the only path they pave. A deck's shared mechanic, its cost modifiers' real reach, and its trigger scopes have no card-level representation |
+| Rules on a decklist | `deck_rules_map`, mechanics only | The corpus documents each keyword, not keyword PAIRS: rules mentioning two keywords are the ones that enumerate all of them (122.1b, 702.1c). An interactions section would be noise with a citation's authority |
+| Uncovered mechanics | Named with the corpus version | The rules file is dated and updates a few times a year. Warp is absent from the April 2025 corpus; silence would read as "nothing to know" |
 | Rules arithmetic | Computed, never narrated | Generic cost reduction (601.2f) and tribal counts (702.73a) are mechanical. Both were done by hand in a real audit and both came out wrong, one of them twice in opposite directions |
 | Declared categories | Measured against the list, drift reported | A count stated by the deck's owner is a constraint. `deck_analysis` and `hand_probability` measure it; `hand_probability` derives `copies` from the list rather than trusting the argument |
 

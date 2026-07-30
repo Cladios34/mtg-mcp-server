@@ -200,6 +200,11 @@ class RulesService:
         self._loaded_at: float = 0.0
         self._load_lock = asyncio.Lock()
 
+    @property
+    def rules_url(self) -> str:
+        """Where this corpus came from — callers cite the version they answered from."""
+        return self._rules_url
+
     async def ensure_loaded(self) -> None:
         """Download and parse rules if not loaded or stale.
 
@@ -441,6 +446,26 @@ class RulesService:
             if lower in name.lower():
                 return num
         return None
+
+    async def subrules(self, number: str) -> list[Rule]:
+        """Return the lettered children of one rule: 702.2a, never 702.20.
+
+        GOTCHA(2026-07-30): a plain prefix test is wrong here. ``702.2`` is a
+        prefix of ``702.20`` through ``702.29``, so selecting deathtouch's
+        subrules that way returned 64 rules instead of 6, most of them about
+        unrelated keywords. The suffix has to be alphabetic. Use
+        :meth:`section_rules` when a numeric prefix IS what you want.
+        """
+        await self.ensure_loaded()
+        parent = number.rstrip(".")
+        children = [
+            rule
+            for candidate, rule in self._rules.items()
+            if candidate != parent
+            and candidate.startswith(parent)
+            and candidate[len(parent) :].isalpha()
+        ]
+        return sorted(children, key=lambda r: _rule_sort_key(r.number))
 
     async def section_rules(self, section_prefix: str) -> list[Rule]:
         """Return all rules whose number starts with the given prefix."""

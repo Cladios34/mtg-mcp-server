@@ -473,6 +473,37 @@ class TestSectionRules:
         assert rules == []
 
 
+class TestSubrules:
+    """The lettered children of one rule -- 702.2a, not 702.20.
+
+    Origin (2026-07-30): selecting subrules with ``startswith("702.2")`` also
+    matches 702.20 through 702.29, so deathtouch came back with 64 subrules
+    instead of 6 -- ten times the text, most of it about other keywords. A
+    prefix test is wrong on any hierarchy whose separator is a digit.
+    """
+
+    async def test_returns_only_lettered_children(self, service: RulesService) -> None:
+        subrules = await service.subrules("702.2")
+        numbers = [r.number for r in subrules]
+        assert numbers, "expected deathtouch subrules"
+        for number in numbers:
+            assert number.startswith("702.2")
+            assert number[len("702.2") :].isalpha(), f"{number} is not a subrule of 702.2"
+
+    async def test_does_not_match_sibling_rules(self, service: RulesService) -> None:
+        """702.20 is vigilance; it is not a child of 702.2."""
+        numbers = [r.number for r in await service.subrules("702.2")]
+        assert "702.20" not in numbers
+        assert not any(n.startswith("702.20") for n in numbers)
+
+    async def test_excludes_the_parent_itself(self, service: RulesService) -> None:
+        numbers = [r.number for r in await service.subrules("702.2")]
+        assert "702.2" not in numbers
+
+    async def test_empty_for_a_rule_without_children(self, service: RulesService) -> None:
+        assert await service.subrules("999.99") == []
+
+
 # ---------------------------------------------------------------------------
 # Lazy loading
 # ---------------------------------------------------------------------------

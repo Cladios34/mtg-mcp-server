@@ -471,7 +471,9 @@ async def deck_analysis(
                 "Counts the deck's owner stated, checked against the actual list. Each "
                 "entry is {name, filter, expected} — e.g. "
                 '{"name": "cheap creatures", "filter": "mv<=1 t:creature", "expected": 13}. '
-                "Filter supports mv/cmc comparisons, t:, o:, name:, kw:. An entry may "
+                "Filter supports mv/cmc comparisons, t:, o:, name:, kw:. Juxtaposed terms "
+                "are ANDed; 'or' unions clauses and binds looser than juxtaposition "
+                "('t:a or t:b mv<=3' = t:a OR (t:b AND mv<=3)). An entry may "
                 "carry an explicit {name, cards, expected} instead of a filter."
             )
         ),
@@ -553,6 +555,47 @@ async def deck_mechanic_map(
         return ToolResult(content=result.markdown, structured_content=result.data)
     except ServiceError as exc:
         raise ToolError(f"deck_mechanic_map failed: {exc}") from exc
+
+
+@workflow_mcp.tool(annotations=TOOL_ANNOTATIONS, tags=TAGS_COMMANDER)
+async def deck_rules_map(
+    decklist: Annotated[list[str], Field(description="Card names in the deck")],
+    commander: Annotated[str, Field(description="The commander's name")],
+    response_format: Annotated[
+        Literal["detailed", "concise"],
+        Field(description="Output verbosity: 'detailed' (default) or 'concise'"),
+    ] = "detailed",
+) -> ToolResult:
+    """Official rules for every mechanic a deck carries, with the subrules that bite.
+
+    The rules tools took a question and the deck tools took a list of cards; nothing
+    joined them. This does: it reads the deck's actual keywords and returns the rule
+    that governs each, down to the subrule where the detail lives — 702.2 only says
+    deathtouch is a static ability, 702.2b is the one that destroys the creature.
+
+    It also names the mechanics the corpus does NOT define. The Comprehensive Rules
+    are a dated file updated a few times a year, so a mechanic newer than it has no
+    entry; saying nothing would read as "nothing to know". Warp, for instance, is
+    absent from the April 2025 corpus entirely.
+
+    It does not claim interactions between two mechanics: measured against the
+    corpus, the rules do not describe keyword pairs, and inventing that section
+    would produce noise carrying the authority of a citation.
+    """
+    from mtg_mcp_server.workflows.rules_deck import deck_rules_map as impl
+
+    try:
+        result = await impl(
+            decklist,
+            commander,
+            rules=_require_rules(),
+            bulk=_bulk,
+            scryfall=_require_scryfall(),
+            response_format=response_format,
+        )
+        return ToolResult(content=result.markdown, structured_content=result.data)
+    except ServiceError as exc:
+        raise ToolError(f"deck_rules_map failed: {exc}") from exc
 
 
 @workflow_mcp.tool(annotations=TOOL_ANNOTATIONS, tags=TAGS_RULES)
@@ -1700,7 +1743,9 @@ async def hand_probability(
         Field(
             description=(
                 "Filter defining the category to count in decklist, e.g. 'mv<=1 t:creature'. "
-                "Supports mv/cmc comparisons, t:, o:, name:, kw:."
+                "Supports mv/cmc comparisons, t:, o:, name:, kw:. Juxtaposed terms are "
+                "ANDed; 'or' unions clauses and binds looser than juxtaposition "
+                "('t:a or t:b mv<=3' = t:a OR (t:b AND mv<=3))."
             )
         ),
     ] = None,
