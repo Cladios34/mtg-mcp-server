@@ -20,18 +20,21 @@ pytestmark = pytest.mark.integration
 class TestToolRegistration:
     """Verify the orchestrator exposes the expected tools."""
 
-    async def test_all_74_tools_registered(self, mcp_client: Client):
-        """The orchestrator exposes exactly 74 tools."""
+    async def test_all_75_tools_registered(self, mcp_client: Client):
+        """The orchestrator exposes exactly 75 tools."""
         tools = await mcp_client.list_tools()
         tool_names = sorted(t.name for t in tools)
         # 1 ping + 6 scryfall + 4 spellbook + 2 draft + 2 edhrec + 4 moxfield + 3 spicerack
-        # + 4 goldfish + 9 bulk + 34 workflows + 5 rules = 74
+        # + 4 goldfish + 9 bulk + 35 workflows + 5 rules = 75
         # Workflows went 31 -> 32 with deck_audit_bundle (2026-07-24), then 32 -> 34 with
-        # deck_mechanic_map and cost_reduction_check (2026-07-28).
-        assert len(tools) == 74, f"Expected 74 tools, got {len(tools)}.\nTools: {tool_names}"
+        # deck_mechanic_map and cost_reduction_check (2026-07-28), then 34 -> 35 with
+        # deck_rules_map (2026-07-30), which is the first tool to join the rules engine
+        # to a decklist.
+        assert len(tools) == 75, f"Expected 75 tools, got {len(tools)}.\nTools: {tool_names}"
         assert "deck_audit_bundle" in tool_names
         assert "deck_mechanic_map" in tool_names
         assert "cost_reduction_check" in tool_names
+        assert "deck_rules_map" in tool_names
 
     async def test_no_mtgjson_tools(self, mcp_client: Client):
         """No tool names contain 'mtgjson' (replaced by Scryfall bulk data)."""

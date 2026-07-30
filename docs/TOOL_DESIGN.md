@@ -724,6 +724,22 @@ Map the mechanics a deck SHARES, rather than the cards it contains. Every other 
 | Annotations | readOnly=true, idempotent=true, openWorld=true |
 | Origin | A deck running 15 cards with one shared keyword was described in every deliverable as a loop toward a single card. No card-indexed tool could show otherwise. |
 
+### `deck_rules_map`
+Official rules for every mechanic a deck carries. The first tool to join the rules engine to a decklist.
+
+| Field | Detail |
+|-------|--------|
+| Input | `decklist: list[str]`, `commander: str`, `response_format: "detailed" \| "concise" = "detailed"` |
+| Output | Markdown with: per-mechanic rule and the subrules carrying the detail (702.2 says deathtouch is a static ability; 702.2b is the one that destroys), the mechanics the corpus does NOT define, and unresolved names |
+| Backends | Rules (required) + Bulk data (optional) + Scryfall (required, fallback resolution) |
+| Data | `mechanics` (each with `rule`, `rule_text`, `subrules`), `mechanics_total`, `uncovered`, `unresolved`, `corpus` |
+| Annotations | readOnly=true, idempotent=true, openWorld=true |
+| Origin | The rules tools took a question, the deck tools took cards, and nothing joined them: a deck could be analysed end to end without one official rule being read. |
+
+**Uncovered mechanics are reported, never dropped.** The Comprehensive Rules are a dated file updated a few times a year. Warp is absent from the April 2025 corpus entirely, and it is the central mechanic of a real deck this server is used on — staying silent would read as "nothing to know about it". The corpus version is stated in both outputs.
+
+**No interactions section, deliberately.** Measured against the corpus on 2026-07-30: searching for rules that mention two keywords returns 122.1b and 702.1c, which merely enumerate every keyword in the game. The rules do not describe keyword pairs; interactions emerge from applying them. Such a section would have produced noise carrying the authority of a citation.
+
 ### `cost_reduction_check`
 Apply a cost reducer to a set of costs mechanically, and name what it does NOT reduce.
 
