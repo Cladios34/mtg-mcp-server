@@ -445,7 +445,7 @@ class TestUnreleasedCardsWarning:
 
     Regression origin (2026-07-30): searching `id<=rwb t:angel f:commander year>=2025`
     for a Kaalia deck returned 5 Angels and looked exhaustive (`has_more: false`).
-    Darksteel Angel was missing — real, spoiled, an Angel — because its set releases
+    Darksteel Angel was missing (real, spoiled, an Angel) because its set releases
     2026-10-02 and Scryfall marks unreleased printings not_legal in every format. The
     user caught it; nothing in the response could have.
     """
@@ -466,9 +466,22 @@ class TestUnreleasedCardsWarning:
     @respx.mock
     async def test_warning_names_the_hidden_card(self, client: Client):
         main = _load_fixture("search_sultai_commander.json")
+        # The spliced card carries Darksteel Angel's REAL shape, not just its name on top
+        # of an unrelated Sultai card: a fixture whose fields contradict each other tests
+        # a response the API never produces (see known pattern fixture-drifted-from-the-wire).
         hidden = {
             **main,
-            "data": [{**main["data"][0], "name": "Darksteel Angel"}],
+            "data": [
+                {
+                    **main["data"][0],
+                    "name": "Darksteel Angel",
+                    "mana_cost": "{9}",
+                    "cmc": 9.0,
+                    "type_line": "Artifact Creature - Angel",
+                    "colors": [],
+                    "color_identity": [],
+                }
+            ],
             "total_cards": 1,
             "has_more": False,
         }
@@ -517,3 +530,55 @@ class TestUnreleasedCardsWarning:
         assert isinstance(sc, dict)
         assert sc["total_cards"] == 9273
         assert sc["unreleased_excluded"] == []
+
+
+class TestProbeNeverCostsTheAnswer:
+    """The probe enriches a warning. It must never delay or break a result already held.
+
+    Adversarial review 2026-07-30: the shared client retries 3x with a 30s timeout, so an
+    unlucky probe could add ~90s to a search that had already succeeded, and blow the
+    caller's own deadline. Losing the hint is cheap; losing the answer is not.
+    """
+
+    @respx.mock
+    async def test_a_hanging_probe_does_not_hold_the_result(self, client: Client):
+        main = _load_fixture("search_sultai_commander.json")
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if "date>" in request.url.params.get("q", ""):
+                raise TimeoutError("probe exceeded its own deadline")
+            return httpx.Response(200, json=main)
+
+        respx.get(f"{BASE_URL}/cards/search").mock(side_effect=handler)
+
+        result = await client.call_tool("search_cards", {"query": "t:angel f:commander"})
+
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert sc["total_cards"] == 9273  # the answer survived
+        assert sc["unreleased_excluded"] == []
+
+    @respx.mock
+    async def test_the_count_comes_from_scryfall_not_from_the_page(self, client: Client):
+        """One page of names, but Scryfall's own total. Reporting len(names) would announce
+        a number the query never measured."""
+        main = _load_fixture("search_sultai_commander.json")
+        hidden = {
+            **main,
+            "data": [{**main["data"][0], "name": "Darksteel Angel"}],
+            "total_cards": 57,
+            "has_more": True,
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "date>" in request.url.params.get("q", ""):
+                return httpx.Response(200, json=hidden)
+            return httpx.Response(200, json=main)
+
+        respx.get(f"{BASE_URL}/cards/search").mock(side_effect=handler)
+
+        result = await client.call_tool("search_cards", {"query": "t:angel f:commander"})
+
+        text = result.content[0].text
+        assert "57 such card(s)" in text
+        assert "showing 1 of them" in text

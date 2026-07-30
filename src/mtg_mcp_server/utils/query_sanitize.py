@@ -99,13 +99,25 @@ def looks_like_scryfall_syntax(query: str) -> bool:
     return bool(_SCRYFALL_SYNTAX.search(query))
 
 
-# A legality filter, in every spelling Scryfall accepts, negated form included.
+# A legality filter, in every spelling Scryfall accepts.
 # GOTCHA(2026-07-30): Scryfall marks a card `not_legal` in EVERY format until its set's
 # release day, so `f:commander` silently drops spoiled cards from sets that are already
 # previewed. A discovery search that carries this filter therefore cannot see anything
 # upcoming, and nothing in the response says so.
+# Negated forms are deliberately NOT matched: `-banned:commander` asks for "not banned",
+# which unreleased cards already satisfy (their status is `not_legal`, never `banned`).
+# Warning on it would flag a query that hides nothing.
 _LEGALITY_FILTER = re.compile(
-    r"(?:^|\s)-?(?:f|format|legal|banned|restricted):\S+",
+    r"(?:^|\s)(?:f|format|legal|banned|restricted):\S+",
+    re.IGNORECASE,
+)
+
+# Date and release-window terms. The probe appends its own `date>today`, so any date term
+# already in the query has to go first: `date<2020` plus `date>today` is satisfiable by
+# nothing at all, and the empty result would be reported as "nothing is hidden": the very
+# false-negative this whole feature exists to prevent.
+_DATE_FILTER = re.compile(
+    r"(?:^|\s)-?(?:date|year):?\s*(?:<=|>=|<|>|=|:)\s*\S+",
     re.IGNORECASE,
 )
 
@@ -128,6 +140,26 @@ def strip_legality_filter(query: str) -> str:
     return " ".join(_LEGALITY_FILTER.sub(" ", query).split())
 
 
+def _is_balanced(query: str) -> bool:
+    """True when quotes and parentheses pair up.
+
+    An unbalanced query cannot be safely extended: appending `date>...` to a query with an
+    open quote makes the appended filters part of a string literal, so they stop being
+    filters. The probe would then match almost nothing and wrongly report "nothing hidden".
+    """
+    if query.count('"') % 2:
+        return False
+    depth = 0
+    for char in query:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
 def unreleased_probe_query(query: str, today: str) -> str | None:
     """Build the query that finds what a legality filter excludes, or None if moot.
 
@@ -136,26 +168,39 @@ def unreleased_probe_query(query: str, today: str) -> str | None:
     previewed before its release", which is true of nearly every modern card
     (measured 2026-07-30: `id<=rwb t:angel is:spoiler` returns 241 cards, including
     Angel of Despair and Akroma).
+
+    Returns None when no meaningful probe can be built: legality was the whole query, or
+    what remains is unbalanced. Returning None is the honest answer, because a probe that
+    silently matches nothing is indistinguishable from "nothing is hidden".
     """
     rest = strip_legality_filter(query)
-    if not rest:
+    rest = " ".join(_DATE_FILTER.sub(" ", rest).split())
+    if not rest or not _is_balanced(rest):
         return None
     return f"{rest} date>{today} {_NEVER_PAPER_LEGAL}"
 
 
-def unreleased_warning(names: list[str], probe: str, shown: int = 10) -> str:
+def unreleased_warning(
+    names: list[str], probe: str, total: int | None = None, shown: int = 10
+) -> str:
     """Build the warning naming the cards a legality filter is hiding.
 
     The names matter more than the count. A generic "beware of legality filters" reads
     once and then goes invisible; a named card the caller expected to see does not.
+
+    ``total`` is Scryfall's own match count, which can exceed the names we hold: the probe
+    reads one page. Reporting ``len(names)`` as the total would announce a number the query
+    never measured, so the two are stated separately when they differ.
     """
     listed = ", ".join(names[:shown])
-    overflow = f" (+{len(names) - shown} more)" if len(names) > shown else ""
+    overflow = f" (+{len(names) - shown} more listed)" if len(names) > shown else ""
+    count = total if total is not None else len(names)
+    partial = f" (showing {len(names)} of them)" if count > len(names) else ""
     return (
         f"NOTE: your query filters on legality, which EXCLUDES cards from sets that "
-        f"have not been released yet — Scryfall marks those not_legal in every format "
-        f"until release day. {len(names)} such card(s) match the rest of your query: "
-        f"{listed}{overflow}. "
+        f"have not been released yet: Scryfall marks those not_legal in every format "
+        f"until release day. {count} such card(s) match the rest of your query"
+        f"{partial}: {listed}{overflow}. "
         f"If you are exploring what EXISTS rather than what is playable today, drop the "
         f"legality term and use `{_NEVER_PAPER_LEGAL}` instead. "
         f"Probe used: {probe!r}"

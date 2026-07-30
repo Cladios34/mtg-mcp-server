@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
 
 import structlog
@@ -61,6 +62,10 @@ async def scryfall_lifespan(server: FastMCP):
 scryfall_mcp = FastMCP("Scryfall", lifespan=scryfall_lifespan, mask_error_details=True)
 
 log = structlog.get_logger(provider="scryfall")
+
+# Deadline for the unreleased-cards probe, well under the shared client's 30s x 3 retries.
+# The probe only enriches a warning: losing it costs a hint, waiting on it costs the answer.
+_PROBE_TIMEOUT_S = 8.0
 
 
 def _get_client() -> ScryfallClient:
@@ -120,15 +125,18 @@ async def search_cards(
 
     # A legality filter hides everything from unreleased sets. Say WHICH cards, by name:
     # the caller cannot act on a count, and a generic caveat stops being read.
+    # UTC, not local time: the server's timezone must not shift the release-date boundary
+    # by a day relative to the dates Scryfall publishes.
     legality_filtered = has_legality_filter(sent_query)
     unreleased: list[str] | None = None
-    probe = unreleased_probe_query(sent_query, date.today().isoformat())
+    unreleased_total: int | None = None
+    probe = unreleased_probe_query(sent_query, datetime.now(UTC).date().isoformat())
     if legality_filtered and probe is not None:
-        unreleased = await _probe_unreleased(client, probe)
+        unreleased, unreleased_total = await _probe_unreleased(client, probe)
 
     lines = [f"Found {result.total_cards} cards (showing {showing} of {total}, page {page}):"]
     if unreleased:
-        lines.insert(0, unreleased_warning(unreleased, probe or ""))
+        lines.insert(0, unreleased_warning(unreleased, probe or "", total=unreleased_total))
     if was_escaped:
         lines.insert(0, escaping_warning(query, sent_query))
     for card in cards:
@@ -148,9 +156,12 @@ async def search_cards(
             "query_sent": sent_query,
             "query_received": query,
             "query_was_escaped": was_escaped,
-            # `unreleased_excluded` is None when no probe ran (no legality filter, so
-            # nothing was hidden on that count) and a list — possibly empty — when one
-            # did. None and [] are NOT the same claim: only [] means "checked, nothing".
+            # `unreleased_excluded` is None when no probe ran, and a list (possibly empty)
+            # when one did. None and [] are NOT the same claim: only [] means "checked,
+            # found nothing". No probe runs when there is no legality filter, but ALSO
+            # when the filter was the whole query or what remained was unbalanced, so
+            # `legality_filter_detected: true` with `unreleased_excluded: null` is a real
+            # and meaningful combination: a filter was seen, nothing could be checked.
             "legality_filter_detected": legality_filtered,
             "unreleased_excluded": unreleased,
             "total_cards": result.total_cards,
@@ -163,24 +174,37 @@ async def search_cards(
     )
 
 
-async def _probe_unreleased(client: ScryfallClient, probe: str) -> list[str]:
-    """Names matching `probe` (the query minus its legality filter, dated to the future).
+async def _probe_unreleased(client: ScryfallClient, probe: str) -> tuple[list[str], int | None]:
+    """Names (first page) and Scryfall's total for `probe`, or ([], None) on any failure.
 
     Best-effort by design: this is a warning path, so a probe that fails must never
-    take down a search that succeeded. Zero matches and a failed probe both yield [].
+    take down a search that succeeded.
 
     GOTCHA(2026-07-30): the catch is deliberately broad. Catching only the two Scryfall
-    exceptions was not enough — anything the client does not wrap (a transport error, a
+    exceptions was not enough: anything the client does not wrap (a transport error, a
     validation error on an odd payload) escaped and killed a search that had ALREADY
     succeeded, turning a nice-to-have warning into an outage. Caught by the existing
     provider tests on the very first run.
+
+    GOTCHA(2026-07-30): the probe gets its OWN deadline. The shared client retries three
+    times with a 30s timeout each, so an unlucky probe could delay a result already in hand
+    by ~90s and blow the caller's own timeout. A warning is never worth losing the answer,
+    hence `_PROBE_TIMEOUT_S`.
+
+    The name list is one page; `total_cards` is the real match count. Both are returned so
+    the message can report the count it actually measured instead of the page size.
     """
     try:
-        found = await client.search_cards(probe, page=1)
+        found = await asyncio.wait_for(client.search_cards(probe, page=1), timeout=_PROBE_TIMEOUT_S)
+    except TimeoutError:
+        # WARNING, not debug: a probe timing out on every call means the safety net is
+        # silently gone. Debug is off in production, so a debug-only log would hide it.
+        log.warning("unreleased_probe_timeout", probe=probe, timeout_s=_PROBE_TIMEOUT_S)
+        return [], None
     except Exception as exc:
-        log.debug("unreleased_probe_failed", probe=probe, error=str(exc))
-        return []
-    return [card.name for card in found.data]
+        log.warning("unreleased_probe_failed", probe=probe, error=str(exc))
+        return [], None
+    return [card.name for card in found.data], found.total_cards
 
 
 @scryfall_mcp.tool(annotations=TOOL_ANNOTATIONS, tags=TAGS_LOOKUP)
