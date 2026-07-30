@@ -137,6 +137,42 @@ class TestFindDecklistCombos:
         assert isinstance(result.included, list)
         assert isinstance(result.almost_included, list)
 
+    @respx.mock
+    async def test_null_popularity_parses(self):
+        """A combo with popularity: null parses instead of failing the whole response.
+
+        The upstream OpenAPI schema declares popularity as a nullable integer;
+        low-play combos come back null and one of them used to raise a Pydantic
+        ValidationError that emptied the entire tool response (seen live
+        2026-07-30).
+        """
+        fixture = {
+            "results": {
+                "identity": "BGU",
+                "included": [
+                    {
+                        "id": "1-2",
+                        "uses": [{"card": {"name": "Obscure Card"}, "zoneLocations": ["B"]}],
+                        "produces": [{"feature": {"name": "Win the game"}, "quantity": 1}],
+                        "popularity": None,
+                    }
+                ],
+                "almostIncluded": [],
+            }
+        }
+        respx.post(f"{BASE_URL}/find-my-combos").mock(
+            return_value=httpx.Response(200, json=fixture)
+        )
+
+        async with SpellbookClient(base_url=BASE_URL) as client:
+            result = await client.find_decklist_combos(
+                commanders=["Muldrotha, the Gravetide"],
+                decklist=["Obscure Card"],
+            )
+
+        assert len(result.included) == 1
+        assert result.included[0].popularity is None
+
 
 class TestEstimateBracket:
     """Commander bracket estimation for a decklist."""

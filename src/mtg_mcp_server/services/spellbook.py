@@ -66,7 +66,7 @@ def _parse_combo(data: dict) -> Combo:
         description=data.get("description", ""),
         easy_prerequisites=data.get("easyPrerequisites", ""),
         notable_prerequisites=data.get("notablePrerequisites", ""),
-        popularity=data.get("popularity", 0),
+        popularity=data.get("popularity"),
         bracket_tag=data.get("bracketTag"),
         legalities=data.get("legalities", {}),
         prices=data.get("prices", {}),

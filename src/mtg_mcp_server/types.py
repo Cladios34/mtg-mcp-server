@@ -222,7 +222,9 @@ class Combo(BaseModel):
     description: str = ""  # Step-by-step combo instructions
     easy_prerequisites: str = ""
     notable_prerequisites: str = ""
-    popularity: int = 0  # Number of decks using this combo
+    # Number of decks using this combo. Nullable in the upstream OpenAPI schema:
+    # low-play combos come back null, and one null used to fail the whole response.
+    popularity: int | None = None
     bracket_tag: str | None = None  # Single-letter bracket code from API
     legalities: dict[str, bool] = Field(default_factory=dict)  # format -> legal?
     prices: dict[str, str] = Field(default_factory=dict)  # marketplace -> price string

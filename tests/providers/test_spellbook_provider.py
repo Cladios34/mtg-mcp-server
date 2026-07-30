@@ -202,11 +202,15 @@ class TestFindDecklistCombos:
                 "popularity": i,
             }
 
+        # One combo has popularity: null (nullable upstream) — the sort must
+        # rank it lowest instead of crashing.
+        null_combo = _combo(0)
+        null_combo["popularity"] = None
         fixture = {
             "results": {
                 "identity": "BGU",
                 "included": [],
-                "almostIncluded": [_combo(i) for i in range(1, 61)],
+                "almostIncluded": [null_combo, *(_combo(i) for i in range(1, 61))],
             }
         }
         respx.post(f"{BASE_URL}/find-my-combos").mock(
@@ -222,15 +226,17 @@ class TestFindDecklistCombos:
         )
         sc = result.structured_content
         assert len(sc["almost_included"]) == 50
-        assert sc["almost_included_total"] == 60
-        # The cap keeps the MOST popular combos (popularity == id here).
+        assert sc["almost_included_total"] == 61
+        # The cap keeps the MOST popular combos (popularity == id here);
+        # the null-popularity combo ranks last and is cut.
         kept_ids = {c["id"] for c in sc["almost_included"]}
         assert "60" in kept_ids
         assert "1" not in kept_ids
+        assert "0" not in kept_ids
 
         text = result.content[0].text
-        assert "top 50 of 60" in text
-        assert "10 more" in text
+        assert "top 50 of 61" in text
+        assert "11 more" in text
 
 
 class TestEstimateBracket:
