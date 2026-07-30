@@ -114,7 +114,8 @@ async def find_combos(
         lines.extend(_format_combo_summary(combo))
         if combo.bracket_tag:
             lines.append(f"    Bracket: {combo.bracket_tag}")
-        lines.append(f"    Popularity: {combo.popularity}")
+        popularity = combo.popularity if combo.popularity is not None else "unknown"
+        lines.append(f"    Popularity: {popularity}")
     return ToolResult(
         content="\n".join(lines) + ATTRIBUTION_SPELLBOOK,
         structured_content={
@@ -166,7 +167,8 @@ async def combo_details(
 
     if combo.bracket_tag:
         lines.append(f"Bracket: {combo.bracket_tag}")
-    lines.append(f"Popularity: {combo.popularity}")
+    popularity = combo.popularity if combo.popularity is not None else "unknown"
+    lines.append(f"Popularity: {popularity}")
 
     return ToolResult(
         content="\n".join(lines) + ATTRIBUTION_SPELLBOOK,
