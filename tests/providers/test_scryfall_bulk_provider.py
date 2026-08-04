@@ -1755,6 +1755,23 @@ class TestUnreleasedGuard:
         assert sc["unreleased_excluded"] == ["Darksteel Angel"]
         assert "Darksteel Angel" in result.content[0].text
 
+    async def test_format_search_upcoming_card_survives_sort_and_limit(self):
+        """An upcoming card has no EDHREC rank: it sorts last and a tight limit
+        would cut it — re-creating the silent disappearance this guard prevents.
+        merge_included must bring it back past the cut."""
+        _, service_patch, date_patch = self._frozen_client(self._angel_pool())
+        with service_patch, date_patch:
+            async with Client(transport=scryfall_bulk_mcp) as client:
+                result = await client.call_tool(
+                    "format_search", {"format": "commander", "query": "Angel", "limit": 1}
+                )
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        names = [c["name"] for c in sc["cards"]]
+        assert "Serra Angel" in names  # the limit still applies to released cards
+        assert "Darksteel Angel" in names  # the guaranteed card rides along
+        assert sc["unreleased_included"] == ["Darksteel Angel"]
+
     async def test_format_search_reports_empty_list_when_nothing_hidden(self):
         """Checked-and-found-nothing is [], a different claim from null."""
         _, service_patch, date_patch = self._frozen_client(self._angel_pool())
