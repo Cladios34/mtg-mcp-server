@@ -180,6 +180,18 @@ def unreleased_probe_query(query: str, today: str) -> str | None:
     return f"{rest} date>{today} {_NEVER_PAPER_LEGAL}"
 
 
+def bare_unreleased_query(today: str) -> str:
+    """Probe matching ALL unreleased paper cards.
+
+    For tools whose only constraint besides legality is a recency window that
+    unreleased cards trivially satisfy (``scryfall_whats_new``): there,
+    "everything upcoming" is exactly what the legality filter hid, so an
+    unconstrained probe is meaningful where :func:`unreleased_probe_query`
+    would return None.
+    """
+    return f"date>{today} {_NEVER_PAPER_LEGAL}"
+
+
 def unreleased_warning(
     names: list[str], probe: str, total: int | None = None, shown: int = 10
 ) -> str:

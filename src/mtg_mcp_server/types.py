@@ -98,6 +98,11 @@ class Card(BaseModel):
     set_code: str = Field(alias="set", default="")  # Aliased: Scryfall JSON uses "set"
     collector_number: str = ""
     rarity: str = ""
+    # ISO date of the printing's release. GOTCHA(2026-08-04): Scryfall marks a card
+    # not_legal in EVERY format until this date, so legality filters silently drop
+    # cards from upcoming sets — utils/unreleased.py needs this field to say so.
+    released_at: str | None = None
+    digital: bool = False  # Digital-only printing (Arena/MTGO) — never paper-legal
     layout: str = ""  # Scryfall layout (e.g. "normal", "transform", "modal_dfc")
     prices: CardPrices = Field(default_factory=CardPrices)
     legalities: dict[str, str] = Field(default_factory=dict)  # format -> "legal"/"not_legal"/etc.

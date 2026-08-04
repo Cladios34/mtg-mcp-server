@@ -26,6 +26,7 @@ from mtg_mcp_server.providers import (
 from mtg_mcp_server.services.scryfall import CardNotFoundError, ScryfallClient, ScryfallError
 from mtg_mcp_server.utils.formatters import ResponseFormat, format_card_detail, format_card_line
 from mtg_mcp_server.utils.query_sanitize import (
+    bare_unreleased_query,
     escaping_warning,
     has_legality_filter,
     normalize_query,
@@ -34,6 +35,7 @@ from mtg_mcp_server.utils.query_sanitize import (
 )
 from mtg_mcp_server.utils.slim import slim_card
 from mtg_mcp_server.utils.triggers import derive_trigger
+from mtg_mcp_server.utils.unreleased import FORMAT_FILTER_CAVEAT, unreleased_param_note
 
 # Module-level client set by the lifespan. This pattern is required because
 # FastMCP's Depends()/lifespan_context DI doesn't propagate through mount().
@@ -371,7 +373,8 @@ async def whats_new(
     format: Annotated[
         str | None,
         Field(
-            description="Filter to cards legal in a format (e.g. 'standard', 'commander', 'modern')"
+            description="Filter to cards legal in a format (e.g. 'standard', 'commander', 'modern')."
+            + FORMAT_FILTER_CAVEAT
         ),
     ] = None,
     limit: Annotated[
@@ -401,10 +404,45 @@ async def whats_new(
         query_parts.append(f"f:{format}")
     query = " ".join(query_parts)
 
+    # A format filter hides everything upcoming: unreleased cards satisfy the recency
+    # window but are not_legal everywhere until release day. The probe finds them by
+    # name. With no set_code the query reduces to legality alone, where the generic
+    # probe builder declines — but here "everything upcoming" IS the hidden answer.
+    probe: str | None = None
+    if format:
+        today = datetime.now(UTC).date().isoformat()
+        probe = unreleased_probe_query(query, today) or bare_unreleased_query(today)
+
     client = _get_client()
+    unreleased: list[str] | None = None
+    unreleased_total: int | None = None
     try:
         result = await client.search_cards(query)
     except CardNotFoundError as exc:
+        if probe is not None:
+            unreleased, unreleased_total = await _probe_unreleased(client, probe)
+        if unreleased:
+            # The most dangerous case: a bare "no cards found" error reads as "these
+            # cards do not exist", when the truth is the format filter removed them.
+            warning = unreleased_param_note(unreleased, format or "", total=unreleased_total)
+            return ToolResult(
+                content=(
+                    f"Found 0 card(s) released in the last {days} day(s)"
+                    + (f" for set '{set_code}'" if set_code else "")
+                    + f" legal in '{format}'.\n\n{warning}"
+                    + ATTRIBUTION_SCRYFALL
+                ),
+                structured_content={
+                    "days": days,
+                    "set_code": set_code,
+                    "format": format,
+                    "total_cards": 0,
+                    "showing": 0,
+                    "has_more": False,
+                    "unreleased_excluded": unreleased,
+                    "cards": [],
+                },
+            )
         raise ToolError(
             f"No new cards found in the last {days} day(s)"
             + (f" for set '{set_code}'" if set_code else "")
@@ -414,11 +452,17 @@ async def whats_new(
     except ScryfallError as exc:
         raise ToolError(f"Scryfall API error: {exc}") from exc
 
+    if probe is not None:
+        unreleased, unreleased_total = await _probe_unreleased(client, probe)
+
     cards = result.data if limit == 0 else result.data[:limit]
     showing = len(cards)
     total = len(result.data)
 
     lines = [f"Found {result.total_cards} card(s) released in the last {days} day(s):"]
+    warning = unreleased_param_note(unreleased or [], format or "", total=unreleased_total)
+    if warning:
+        lines.insert(0, warning)
     for card in cards:
         if response_format == "concise":
             set_label = card.set_code.upper() if card.set_code else ""
@@ -441,6 +485,9 @@ async def whats_new(
             "total_cards": result.total_cards,
             "showing": showing,
             "has_more": result.has_more,
+            # Same contract as scryfall_search_cards: None when no probe ran (no
+            # format filter), a list — possibly empty — when one did.
+            "unreleased_excluded": unreleased,
             "cards": [slim_card(card) for card in cards],
         },
     )

@@ -437,3 +437,74 @@ class TestSuggestManaBaseResponseFormat:
         assert "## Color Pip Distribution" not in concise.markdown
         assert "## Color Pip Distribution" in detailed.markdown
         assert isinstance(detailed.data, dict)
+
+
+# ---------------------------------------------------------------------------
+# Unreleased-card guard tests
+# ---------------------------------------------------------------------------
+
+
+class TestUnreleasedGuard:
+    """The format filter on the dual-land search must name what it hides."""
+
+    @staticmethod
+    def _two_color_deck() -> dict[str, Card | None]:
+        cards: dict[str, Card | None] = {}
+        for i in range(10):
+            cards[f"Dimir Spell {i}"] = _make_card(
+                name=f"Dimir Spell {i}",
+                mana_cost="{U}{B}",
+                colors=["U", "B"],
+                color_identity=["U", "B"],
+                cmc=2.0,
+            )
+        return cards
+
+    async def test_unreleased_dual_lands_are_named(self) -> None:
+        """An unreleased dual matching the search is reported; a mono-color land
+        the tool's own post-filter would drop anyway is NOT — that would be a
+        false 'hidden' claim."""
+        hidden_dual = _make_card(
+            name="Darksteel Citadel Bridge",
+            type_line="Land",
+            color_identity=["U", "B"],
+            legalities={"commander": "not_legal"},
+        )
+        hidden_mono = _make_card(
+            name="Upcoming Mono Land",
+            type_line="Land",
+            color_identity=["U"],
+            legalities={"commander": "not_legal"},
+        )
+
+        async def side_effect(**kwargs):
+            collector = kwargs.get("unreleased")
+            if collector is not None and kwargs.get("format") is not None:
+                collector.collect(hidden_dual)
+                collector.collect(hidden_mono)
+            return []
+
+        mock_bulk = _make_bulk(self._two_color_deck())
+        mock_bulk.filter_cards = AsyncMock(side_effect=side_effect)
+
+        result = await suggest_mana_base(
+            list(self._two_color_deck().keys()), "commander", bulk=mock_bulk
+        )
+
+        assert result.data["unreleased_excluded"] == ["Darksteel Citadel Bridge"]
+        assert "Darksteel Citadel Bridge" in result.markdown
+        assert "Upcoming Mono Land" not in result.markdown
+
+    async def test_mono_color_deck_makes_no_claim(self) -> None:
+        """No dual-land search ran, so nothing was checked: None, not []."""
+        cards: dict[str, Card | None] = {
+            f"Bolt {i}": _make_card(
+                name=f"Bolt {i}", mana_cost="{R}", colors=["R"], color_identity=["R"]
+            )
+            for i in range(10)
+        }
+        mock_bulk = _make_bulk(cards)
+
+        result = await suggest_mana_base(list(cards.keys()), "commander", bulk=mock_bulk)
+
+        assert result.data["unreleased_excluded"] is None

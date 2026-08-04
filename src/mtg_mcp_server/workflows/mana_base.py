@@ -14,6 +14,7 @@ import structlog
 from mtg_mcp_server.utils.decklist import parse_decklist
 from mtg_mcp_server.utils.format_rules import normalize_format
 from mtg_mcp_server.utils.mana import count_pips, suggest_land_count
+from mtg_mcp_server.utils.unreleased import UnreleasedCollector, unreleased_param_note
 from mtg_mcp_server.workflows import WorkflowResult
 
 if TYPE_CHECKING:
@@ -142,21 +143,33 @@ async def suggest_mana_base(
 
     # --- Dual land suggestions ---
     dual_lands: list[Card] = []
+    # None until the dual-land search runs: with fewer than 2 colors no legality
+    # filtering happens, so there is nothing to check ("not checked", not "none found").
+    unreleased_duals: list[str] | None = None
     if len(deck_colors) >= 2:
+        collector = UnreleasedCollector(active=True)
         try:
             dual_lands = await bulk.filter_cards(
                 format=fmt,
                 type_contains=["Land"],
                 color_identity=frozenset(deck_colors),
                 limit=20,
+                unreleased=collector,
             )
         except Exception:
             log.warning("suggest_mana_base.dual_land_search_failed", format=fmt)
             dual_lands = []
-        # Filter to only dual/multi lands (must produce colored mana)
+        # Filter to only dual/multi lands (must produce colored mana). The collected
+        # unreleased cards go through the SAME post-filter: a mono-color land the
+        # tool would have dropped anyway must not be reported as "hidden".
         dual_lands = [
             card for card in dual_lands if card.color_identity and len(card.color_identity) >= 2
         ][:8]
+        unreleased_duals = [
+            card.name
+            for card in collector.cards
+            if card.color_identity and len(card.color_identity) >= 2
+        ]
 
     # --- Heavy color warnings ---
     heavy_warnings: list[str] = []
@@ -218,6 +231,11 @@ async def suggest_mana_base(
                 lines.append(f"- **{card.name}** ({colors}) - {price}")
             lines.append("")
 
+        dual_note = unreleased_param_note(unreleased_duals or [], fmt)
+        if dual_note:
+            lines.append(dual_note)
+            lines.append("")
+
         # Warnings
         if heavy_warnings:
             lines.append("## Warnings")
@@ -244,6 +262,7 @@ async def suggest_mana_base(
             {"name": c.name, "color_identity": list(c.color_identity), "price_usd": c.prices.usd}
             for c in dual_lands
         ],
+        "unreleased_excluded": unreleased_duals,
         "heavy_warnings": heavy_warnings,
         "resolved_count": resolved_count,
         "unresolved_count": unresolved_count,

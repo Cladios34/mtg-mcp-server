@@ -42,6 +42,8 @@ from mtg_mcp_server.utils.mechanics import has_creature_type
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from mtg_mcp_server.utils.unreleased import UnreleasedCollector
+
 # Card types, as opposed to creature subtypes. A changeling is every creature type
 # (702.73a) but it is not an Artifact, so these never pick up changelings.
 _CARD_TYPES = frozenset(
@@ -380,6 +382,7 @@ class ScryfallBulkClient:
         rarity: str | None = None,
         name_contains: str | None = None,
         limit: int = 100,
+        unreleased: UnreleasedCollector | None = None,
     ) -> list[Card]:
         """Multi-criteria filter over all cards. Returns up to ``limit`` matches.
 
@@ -400,6 +403,10 @@ class ScryfallBulkClient:
             rarity: Exact rarity match (e.g. ``"mythic"``).
             name_contains: Substring match on card name (case-insensitive).
             limit: Maximum results to return.
+            unreleased: When given alongside ``format``, receives every card that
+                matched all OTHER criteria but was excluded only because its set has
+                not been released yet. Collecting here rather than at each call site
+                keeps the probe's criteria identical to the search's by construction.
 
         Returns:
             Matching cards, up to ``limit``.
@@ -415,7 +422,17 @@ class ScryfallBulkClient:
 
         results: list[Card] = []
         for card in self._unique_cards:
-            if format is not None and card.legalities.get(format) != "legal":
+            if len(results) >= limit:
+                # Results are full; keep scanning only while unreleased hunting remains,
+                # otherwise later unreleased matches would be silently missed.
+                if unreleased is None or unreleased.full:
+                    break
+            legal = format is None or card.legalities.get(format) == "legal"
+            if not legal:
+                # Only unreleased rejects are worth running the other criteria on.
+                if unreleased is None or not unreleased.offer(card):
+                    continue
+            elif len(results) >= limit:
                 continue
             if color_identity is not None and not frozenset(card.color_identity).issubset(
                 color_identity
@@ -454,9 +471,11 @@ class ScryfallBulkClient:
             if name_lower is not None and name_lower not in card.name.lower():
                 continue
 
+            if not legal:
+                if unreleased is not None:
+                    unreleased.collect(card)
+                continue
             results.append(card)
-            if len(results) >= limit:
-                break
 
         return results
 
@@ -508,6 +527,7 @@ class ScryfallBulkClient:
         color_identity: frozenset[str] | None = None,
         type_contains: str | None = None,
         rarity: str | None = None,
+        unreleased: UnreleasedCollector | None = None,
     ) -> Card | None:
         """Random card from a filtered pool. None if pool is empty.
 
@@ -516,6 +536,9 @@ class ScryfallBulkClient:
             color_identity: Cards whose color identity is a subset of this set.
             type_contains: String that must appear in the type line (case-insensitive).
             rarity: Exact rarity match.
+            unreleased: When given alongside ``format``, receives every card that
+                matched all OTHER criteria but was excluded only because its set has
+                not been released yet.
 
         Returns:
             A random matching card, or None if no cards match.
@@ -526,7 +549,8 @@ class ScryfallBulkClient:
         type_lower = type_contains.lower() if type_contains else None
 
         for card in self._unique_cards:
-            if format is not None and card.legalities.get(format) != "legal":
+            legal = format is None or card.legalities.get(format) == "legal"
+            if not legal and (unreleased is None or not unreleased.offer(card)):
                 continue
             if color_identity is not None and not frozenset(card.color_identity).issubset(
                 color_identity
@@ -535,6 +559,10 @@ class ScryfallBulkClient:
             if type_lower is not None and type_lower not in card.type_line.lower():
                 continue
             if rarity is not None and card.rarity != rarity:
+                continue
+            if not legal:
+                if unreleased is not None:
+                    unreleased.collect(card)
                 continue
             pool.append(card)
 

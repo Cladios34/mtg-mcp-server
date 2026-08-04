@@ -591,3 +591,50 @@ class TestDeckValidateResponseFormat:
 
         assert "INVALID" in concise.markdown
         assert "banned" in concise.markdown.lower()
+
+
+# ---------------------------------------------------------------------------
+# Family B non-regression: validation answers not_legal, it does not "fix" it
+# ---------------------------------------------------------------------------
+
+
+class TestUnreleasedCardStaysInvalid:
+    """deck_validate's job IS to answer not_legal for unreleased cards.
+
+    The unreleased-card guard added to discovery tools (2026-08-04) must never
+    leak here: an unreleased card in a decklist is a legality violation today,
+    and consumers depend on that answer.
+    """
+
+    async def test_unreleased_card_fails_validation(self) -> None:
+        darksteel = _make_card(
+            name="Darksteel Angel",
+            type_line="Artifact Creature - Angel",
+            color_identity=["W"],
+            legalities={"commander": "not_legal"},
+        ).model_copy(update={"released_at": "2026-10-02"})
+        commander = _make_card(
+            name="Giada, Font of Hope",
+            type_line="Legendary Creature - Angel",
+            color_identity=["W"],
+            legalities={"commander": "legal"},
+        )
+        cards: dict[str, Card | None] = {
+            "Giada, Font of Hope": commander,
+            "Darksteel Angel": darksteel,
+        }
+        filler = [f"Plains {i}" for i in range(98)]
+        for name in filler:
+            cards[name] = _make_card(name=name, type_line="Basic Land - Plains", color_identity=[])
+        mock_bulk = _make_bulk(cards)
+
+        result = await deck_validate(
+            ["Darksteel Angel", *filler],
+            "commander",
+            commander="Giada, Font of Hope",
+            bulk=mock_bulk,
+        )
+
+        assert "INVALID" in result.markdown
+        assert "Darksteel Angel" in result.markdown
+        assert result.data["valid"] is False

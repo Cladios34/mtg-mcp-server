@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Literal
 import structlog
 
 from mtg_mcp_server.utils.color_identity import parse_color_identity
+from mtg_mcp_server.utils.unreleased import UnreleasedCollector
 from mtg_mcp_server.workflows import WorkflowResult
 
 if TYPE_CHECKING:
@@ -269,6 +270,9 @@ async def theme_search(
             )
 
     cards: list[Card] = []
+    # Active only when a format was asked for: the legality filter is what hides
+    # unreleased cards, so without it there is nothing to check (field() -> None).
+    collector = UnreleasedCollector(active=format is not None)
 
     if theme_lower in THEME_MAPPINGS:
         # Mechanical theme -- use text_any / text_contains from mapping
@@ -289,6 +293,7 @@ async def theme_search(
             format=format,
             max_price=max_price,
             limit=limit,
+            unreleased=collector,
         )
     elif theme_lower in ABSTRACT_THEMES:
         # Abstract theme -- search name and text for synonyms
@@ -298,6 +303,7 @@ async def theme_search(
             format=format,
             max_price=max_price,
             limit=limit,
+            unreleased=collector,
         )
     else:
         # Assume tribal or unknown -- try type line first, then text search
@@ -307,6 +313,7 @@ async def theme_search(
             format=format,
             max_price=max_price,
             limit=limit,
+            unreleased=collector,
         )
 
         if not cards:
@@ -318,14 +325,18 @@ async def theme_search(
                 format=format,
                 max_price=max_price,
                 limit=limit,
+                unreleased=collector,
             )
 
     # Build output
     total = len(cards)
+    note = collector.note(format or "")
     lines: list[str] = []
 
     if response_format == "concise":
         lines.append(f"# Theme: {theme} ({total} cards)")
+        if note:
+            lines.append(note)
         lines.append("")
         for card in cards[:limit]:
             lines.append(_fmt_card_concise(card))
@@ -340,6 +351,9 @@ async def theme_search(
             lines.append(f"**Max price:** ${max_price:.2f}")
         lines.append(f"**Found:** {total} cards")
         lines.append("")
+        if note:
+            lines.append(note)
+            lines.append("")
 
         if not cards:
             lines.append("No cards found matching this theme.")
@@ -351,6 +365,7 @@ async def theme_search(
     data: dict[str, object] = {
         "theme": theme_lower,
         "total_found": total,
+        "unreleased_excluded": collector.field(),
         "cards": [
             {
                 "name": c.name,
@@ -453,6 +468,7 @@ async def build_around(
 
     # Step 3: Search for synergistic cards
     synergy_cards: list[Card] = []
+    collector = UnreleasedCollector(active=True)  # format is required on this tool
     if unique_keywords:
         # Search for cards with overlapping mechanics
         synergy_cards = await bulk.filter_cards(
@@ -460,6 +476,7 @@ async def build_around(
             format=format,
             max_price=budget,
             limit=limit,
+            unreleased=collector,
         )
 
     # Remove build-around cards from results
@@ -536,6 +553,11 @@ async def build_around(
         else:
             lines.append("No additional synergistic cards found.")
 
+    note = collector.note(format)
+    if note:
+        lines.append("")
+        lines.append(note)
+
     log.info(
         "build_around.complete",
         cards=cards,
@@ -546,6 +568,7 @@ async def build_around(
         "build_around_cards": [c.name for c in resolved],
         "unresolved": unresolved,
         "format": format,
+        "unreleased_excluded": collector.field(),
         "synergy_cards": [
             {
                 "name": c.name,
@@ -764,6 +787,7 @@ async def complete_deck(
 
     # Search for suggestions in underrepresented categories
     suggestions: dict[str, list[Card]] = {}
+    collector = UnreleasedCollector(active=True)  # format is required on this tool
     for cat, needed in gaps.items():
         cat_limit = min(needed + 3, 10)  # A few extra for variety
         fmt = format.lower()
@@ -789,6 +813,7 @@ async def complete_deck(
             color_identity=commander_identity,
             max_price=budget,
             limit=cat_limit,
+            unreleased=collector,
         )
         # Exclude cards already in the deck
         existing_names = {c.name.lower() for c in resolved}
@@ -856,6 +881,11 @@ async def complete_deck(
             for name in unresolved:
                 lines.append(f"- {name}")
 
+    note = collector.note(format)
+    if note:
+        lines.append("")
+        lines.append(note)
+
     log.info(
         "complete_deck.complete",
         resolved=len(resolved),
@@ -872,6 +902,7 @@ async def complete_deck(
         "suggestions": {
             cat: [c.name for c in cards_list[:5]] for cat, cards_list in suggestions.items()
         },
+        "unreleased_excluded": collector.field(),
         "unresolved": unresolved,
     }
     return WorkflowResult(markdown="\n".join(lines), data=data)

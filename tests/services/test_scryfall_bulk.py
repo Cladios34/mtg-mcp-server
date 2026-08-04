@@ -19,6 +19,7 @@ from mtg_mcp_server.services.scryfall_bulk import (
     ScryfallBulkDownloadError,
     ScryfallBulkError,
 )
+from mtg_mcp_server.utils.unreleased import UnreleasedCollector
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "scryfall_bulk"
 
@@ -365,10 +366,10 @@ class TestParsing:
     """Test that the bulk data is parsed correctly into Card models."""
 
     async def test_correct_card_count(self, loaded_client: ScryfallBulkClient):
-        """29 playable cards (4 non-playable layouts filtered), 30 dict entries for DFC."""
-        assert len(loaded_client._unique_cards) == 29
-        # 29 normal keys + 1 extra for DFC front-face-only key
-        assert len(loaded_client._cards) == 30
+        """30 playable cards (4 non-playable layouts filtered), 31 dict entries for DFC."""
+        assert len(loaded_client._unique_cards) == 30
+        # 30 normal keys + 1 extra for DFC front-face-only key
+        assert len(loaded_client._cards) == 31
 
     async def test_card_has_prices(self, loaded_client: ScryfallBulkClient):
         """Parsed cards have price data."""
@@ -859,8 +860,8 @@ class TestParseFailures:
             client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=24)
             async with client:
                 await client.ensure_loaded()
-                # Fixture has 29 playable cards (non-playable layouts filtered)
-                assert len(client._unique_cards) == 29
+                # Fixture has 30 playable cards (non-playable layouts filtered)
+                assert len(client._unique_cards) == 30
                 assert await client.get_card("Sol Ring") is not None
 
     async def test_corrupt_data_on_refresh_serves_stale(self):
@@ -892,6 +893,84 @@ class TestParseFailures:
                 # Stale data still available
                 assert len(client._unique_cards) == original_count
                 assert await client.get_card("Sol Ring") is not None
+
+
+class TestUnreleasedCollection:
+    """A format filter must not silently drop cards from unreleased sets.
+
+    The fixture carries the real Darksteel Angel (set 'frc', released_at
+    2026-10-02, not_legal in every format until then). Collectors are built with
+    a frozen `today` so these tests do not rot when that set actually releases.
+    """
+
+    _TODAY = "2026-08-04"
+
+    async def test_filter_cards_collects_unreleased_matches(
+        self, loaded_client: ScryfallBulkClient
+    ):
+        """An unreleased card matching every other criterion is named, not returned."""
+        collector = UnreleasedCollector(active=True, today=self._TODAY)
+        results = await loaded_client.filter_cards(
+            format="commander",
+            type_contains=["Angel"],
+            unreleased=collector,
+        )
+        assert all(c.legalities.get("commander") == "legal" for c in results)
+        assert "Darksteel Angel" in collector.names
+
+    async def test_filter_cards_ignores_unreleased_failing_other_criteria(
+        self, loaded_client: ScryfallBulkClient
+    ):
+        """A card the OTHER criteria reject was not hidden by the legality filter,
+        so reporting it as excluded would be a false claim."""
+        collector = UnreleasedCollector(active=True, today=self._TODAY)
+        await loaded_client.filter_cards(
+            format="commander",
+            type_contains=["Sorcery"],  # Darksteel Angel is a creature
+            unreleased=collector,
+        )
+        assert "Darksteel Angel" not in collector.names
+
+    async def test_filter_cards_collects_even_when_limit_reached(
+        self, loaded_client: ScryfallBulkClient
+    ):
+        """A tiny limit must not stop the unreleased hunt: the guard exists
+        precisely for searches that look complete."""
+        collector = UnreleasedCollector(active=True, today=self._TODAY)
+        results = await loaded_client.filter_cards(
+            format="commander",
+            type_contains=["Creature"],
+            limit=1,
+            unreleased=collector,
+        )
+        assert len(results) == 1
+        assert "Darksteel Angel" in collector.names
+
+    async def test_filter_cards_without_collector_unchanged(
+        self, loaded_client: ScryfallBulkClient
+    ):
+        """No collector, no behavior change: unreleased cards are simply filtered."""
+        results = await loaded_client.filter_cards(format="commander", type_contains=["Angel"])
+        assert all(c.name != "Darksteel Angel" for c in results)
+
+    async def test_released_card_never_reported(self, loaded_client: ScryfallBulkClient):
+        """After release day the same card is a genuine legality miss, not a hidden one."""
+        collector = UnreleasedCollector(active=True, today="2027-01-01")
+        await loaded_client.filter_cards(
+            format="commander",
+            type_contains=["Angel"],
+            unreleased=collector,
+        )
+        assert "Darksteel Angel" not in collector.names
+
+    async def test_random_card_collects_unreleased_matches(self, loaded_client: ScryfallBulkClient):
+        collector = UnreleasedCollector(active=True, today=self._TODAY)
+        await loaded_client.random_card(
+            format="commander",
+            type_contains="Angel",
+            unreleased=collector,
+        )
+        assert "Darksteel Angel" in collector.names
 
 
 class TestETagEdgeCases:

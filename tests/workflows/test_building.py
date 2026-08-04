@@ -853,3 +853,92 @@ class TestCompleteDeck:
         )
 
         assert result.data["unresolved"] is not None
+
+
+# ===========================================================================
+# Unreleased-card guard tests
+# ===========================================================================
+
+
+def _collecting_filter_cards(hidden: Card, results: list[Card] | None = None):
+    """filter_cards side_effect mirroring the service's unreleased collection.
+
+    When both a format filter and a collector are passed, the hidden card is
+    reported as unreleased-excluded — exactly what the real service does for a
+    card matching every criterion except legality.
+    """
+
+    async def side_effect(**kwargs):
+        collector = kwargs.get("unreleased")
+        if collector is not None and kwargs.get("format") is not None:
+            collector.collect(hidden)
+        return list(results or [])
+
+    return side_effect
+
+
+class TestUnreleasedGuard:
+    """Format filters must name the unreleased cards they hide.
+
+    Origin (2026-08-04): theme_search('angels') returned 4 cards, with
+    format='commander' only 3 — Darksteel Angel (releases 2026-10-02) vanished
+    without any signal.
+    """
+
+    @staticmethod
+    def _hidden() -> Card:
+        return _mock_card(
+            "Darksteel Angel",
+            type_line="Artifact Creature - Angel",
+            legalities={"commander": "not_legal"},
+        )
+
+    async def test_theme_search_reports_unreleased(self, mock_bulk: AsyncMock) -> None:
+        blood_artist = _mock_card(
+            "Blood Artist", oracle_text="Whenever a creature dies, you gain 1 life."
+        )
+        mock_bulk.filter_cards = AsyncMock(
+            side_effect=_collecting_filter_cards(self._hidden(), [blood_artist])
+        )
+
+        result = await theme_search("aristocrats", bulk=mock_bulk, format="commander")
+
+        assert result.data["unreleased_excluded"] == ["Darksteel Angel"]
+        assert "Darksteel Angel" in result.markdown
+        assert "not_legal" in result.markdown
+
+    async def test_theme_search_without_format_makes_no_claim(self, mock_bulk: AsyncMock) -> None:
+        """No legality filter, nothing checked: None, never a misleading []."""
+        mock_bulk.filter_cards = AsyncMock(side_effect=_collecting_filter_cards(self._hidden()))
+
+        result = await theme_search("aristocrats", bulk=mock_bulk)
+
+        assert result.data["unreleased_excluded"] is None
+
+    async def test_build_around_reports_unreleased(
+        self, mock_bulk: AsyncMock, mock_spellbook: AsyncMock
+    ) -> None:
+        artist = _mock_card(
+            "Blood Artist", oracle_text="Whenever a creature dies, you gain 1 life."
+        )
+        mock_bulk.get_cards = AsyncMock(return_value={"Blood Artist": artist})
+        mock_bulk.filter_cards = AsyncMock(side_effect=_collecting_filter_cards(self._hidden()))
+
+        result = await build_around(
+            ["Blood Artist"], "commander", bulk=mock_bulk, spellbook=mock_spellbook
+        )
+
+        assert result.data["unreleased_excluded"] == ["Darksteel Angel"]
+        assert "Darksteel Angel" in result.markdown
+
+    async def test_complete_deck_reports_unreleased(self, mock_bulk: AsyncMock) -> None:
+        creature = _mock_card(
+            "Llanowar Elves", type_line="Creature - Elf Druid", color_identity=["G"]
+        )
+        mock_bulk.get_cards = AsyncMock(return_value={"Llanowar Elves": creature})
+        mock_bulk.filter_cards = AsyncMock(side_effect=_collecting_filter_cards(self._hidden()))
+
+        result = await complete_deck(["Llanowar Elves"], "commander", bulk=mock_bulk)
+
+        assert result.data["unreleased_excluded"] == ["Darksteel Angel"]
+        assert "Darksteel Angel" in result.markdown

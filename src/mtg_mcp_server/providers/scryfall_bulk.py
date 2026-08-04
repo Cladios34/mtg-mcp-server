@@ -41,6 +41,7 @@ from mtg_mcp_server.utils.mechanics import has_creature_type
 from mtg_mcp_server.utils.query_parser import parse_query
 from mtg_mcp_server.utils.query_sanitize import looks_like_scryfall_syntax
 from mtg_mcp_server.utils.slim import slim_card
+from mtg_mcp_server.utils.unreleased import FORMAT_FILTER_CAVEAT, UnreleasedCollector
 
 # Lightweight format alias map — maps common abbreviations to Scryfall legality
 # keys. Unlike utils.format_rules.normalize_format, this does NOT reject unknown
@@ -349,7 +350,12 @@ async def format_legality(
 async def format_search(
     format: Annotated[
         str,
-        Field(description="Format to search in (e.g. 'commander', 'modern', 'standard')"),
+        Field(
+            description="Format to search in (e.g. 'commander', 'modern', 'standard')."
+            + FORMAT_FILTER_CAVEAT
+            + " This parameter is required here; use bulk_card_search for a search "
+            "without any legality filter."
+        ),
     ],
     query: Annotated[
         str,
@@ -410,10 +416,13 @@ async def format_search(
     rarity_lower = rarity.lower() if rarity else None
 
     MAX_CANDIDATES = 5000  # Cap accumulation for very broad queries
+    collector = UnreleasedCollector(active=True)
     matches: list[Card] = []
     for card in all_cards:
-        # Format legality check
-        if card.legalities.get(fmt) != "legal":
+        # Format legality check. Unreleased rejects keep going: if they match every
+        # other criterion they are named in `unreleased_excluded` instead of vanishing.
+        legal = card.legalities.get(fmt) == "legal"
+        if not legal and not collector.offer(card):
             continue
         # Color identity check
         if identity is not None and not is_within_identity(card.color_identity, identity):
@@ -454,15 +463,19 @@ async def format_search(
             ):
                 continue
 
+        if not legal:
+            collector.collect(card)
+            continue
         matches.append(card)
         if len(matches) >= MAX_CANDIDATES:
             break
 
-    if not matches:
+    if not matches and not collector.names:
         raise ToolError(
             f"No legal {fmt} cards found matching '{query}'"
             + (f" in {color_identity}" if color_identity else "")
-            + "."
+            + ". Zero here is not proof the cards do not exist — bulk_card_search "
+            "searches without any legality filter."
         )
 
     # Sort by EDHREC rank (lower = more popular), None last
@@ -474,6 +487,12 @@ async def format_search(
     if color_identity:
         lines[0] += f" ({color_identity})"
     lines.append(f"Found {len(matches)} result(s):")
+    note = collector.note(fmt)
+    if note:
+        # The empty-result case is the dangerous one: without this note, "0 results"
+        # reads as "these cards do not exist" when the truth is the filter hid them.
+        lines.append("")
+        lines.append(note)
     lines.append("")
     for card in matches:
         if response_format == "concise":
@@ -491,6 +510,7 @@ async def format_search(
             "query": query,
             "color_identity": color_identity,
             "total_results": len(matches),
+            "unreleased_excluded": collector.field(),
             "cards": [slim_card(card) for card in matches],
         },
     )
@@ -811,7 +831,10 @@ async def similar_cards(
     ],
     format: Annotated[
         str | None,
-        Field(description="Format filter (e.g. 'commander', 'modern'). Only returns legal cards."),
+        Field(
+            description="Format filter (e.g. 'commander', 'modern'). Only returns legal cards."
+            + FORMAT_FILTER_CAVEAT
+        ),
     ] = None,
     max_price: Annotated[
         float | None,
@@ -841,6 +864,7 @@ async def similar_cards(
         raise ToolError(f"Card not found: '{card_name}'. Check spelling.")
 
     fmt = normalize_format(format) if format else None
+    collector = UnreleasedCollector(active=fmt is not None)
 
     scored: list[tuple[float, Card]] = []
     source_name_lower = source.name.lower()
@@ -848,7 +872,8 @@ async def similar_cards(
     for card in all_cards:
         if card.name.lower() == source_name_lower:
             continue
-        if fmt and card.legalities.get(fmt) != "legal":
+        legal = fmt is None or card.legalities.get(fmt) == "legal"
+        if not legal and not collector.offer(card):
             continue
         if max_price is not None:
             price_str = card.prices.usd
@@ -862,9 +887,12 @@ async def similar_cards(
 
         score = _score_similarity(source, card)
         if score > 0:
+            if not legal:
+                collector.collect(card)
+                continue
             scored.append((score, card))
 
-    if not scored:
+    if not scored and not collector.names:
         raise ToolError(f"No similar cards found for '{source.name}'.")
 
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -875,6 +903,10 @@ async def similar_cards(
         f"*{source.mana_cost or 'No cost'} -- {source.type_line}*",
         "",
     ]
+    note = collector.note(fmt or "")
+    if note:
+        lines.append(note)
+        lines.append("")
     for score, card in top:
         if response_format == "concise":
             lines.append(f"  {card.name} (score: {score:.0f}%)")
@@ -888,6 +920,7 @@ async def similar_cards(
         structured_content={
             "source_card": source.name,
             "total_results": len(top),
+            "unreleased_excluded": collector.field(),
             "similar": [{"score": score, **slim_card(card)} for score, card in top],
         },
     )
@@ -897,7 +930,10 @@ async def similar_cards(
 async def random_card(
     format: Annotated[
         str | None,
-        Field(description="Format filter (e.g. 'commander', 'modern'). Only returns legal cards."),
+        Field(
+            description="Format filter (e.g. 'commander', 'modern'). Only returns legal cards."
+            + FORMAT_FILTER_CAVEAT
+        ),
     ] = None,
     color_identity: Annotated[
         str | None,
@@ -925,22 +961,40 @@ async def random_card(
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
 
+    collector = UnreleasedCollector(active=fmt is not None)
     try:
         card = await client.random_card(
             format=fmt,
             color_identity=identity,
             type_contains=card_type,
             rarity=rarity.lower() if rarity else None,
+            unreleased=collector,
         )
     except ScryfallBulkError as exc:
         raise ToolError(f"Scryfall bulk data error: {exc}") from exc
 
+    note = collector.note(fmt or "")
     if card is None:
+        if note:
+            # An empty pool with unreleased matches must not read as "no such cards":
+            # the cards exist, the legality filter removed them.
+            return ToolResult(
+                content=f"No released cards match the specified filters.\n\n{note}"
+                + ATTRIBUTION_SCRYFALL_BULK,
+                structured_content={"card": None, "unreleased_excluded": collector.field()},
+            )
         raise ToolError("No cards match the specified filters.")
 
+    lines = _format_card_detail_with_legalities(card)
+    if note:
+        lines.append("")
+        lines.append(note)
     return ToolResult(
-        content="\n".join(_format_card_detail_with_legalities(card)) + ATTRIBUTION_SCRYFALL_BULK,
-        structured_content=card.model_dump(mode="json"),
+        content="\n".join(lines) + ATTRIBUTION_SCRYFALL_BULK,
+        structured_content={
+            **card.model_dump(mode="json"),
+            "unreleased_excluded": collector.field(),
+        },
     )
 
 

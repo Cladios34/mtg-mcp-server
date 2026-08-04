@@ -48,6 +48,7 @@ from mtg_mcp_server.services.scryfall_bulk import ScryfallBulkClient
 from mtg_mcp_server.services.seventeen_lands import SeventeenLandsClient
 from mtg_mcp_server.services.spellbook import SpellbookClient
 from mtg_mcp_server.services.spicerack import SpicerackClient
+from mtg_mcp_server.utils.unreleased import FORMAT_FILTER_CAVEAT
 
 # Module-level clients managed by the lifespan via AsyncExitStack.
 # Workflows need multiple clients simultaneously; AsyncExitStack is cleaner
@@ -707,7 +708,10 @@ async def theme_search(
     ] = None,
     format: Annotated[
         str | None,
-        Field(description="Format legality filter (e.g. 'standard', 'modern', 'commander')"),
+        Field(
+            description="Format legality filter (e.g. 'standard', 'modern', 'commander')."
+            + FORMAT_FILTER_CAVEAT
+        ),
     ] = None,
     max_price: Annotated[float | None, Field(description="Maximum card price in USD")] = None,
     limit: Annotated[int, Field(description="Maximum number of results")] = 20,
@@ -746,7 +750,10 @@ async def build_around(
     cards: Annotated[list[str], Field(description="1-5 card names to build around")],
     format: Annotated[
         str,
-        Field(description="Format to build for (e.g. 'standard', 'modern', 'commander')"),
+        Field(
+            description="Format to build for (e.g. 'standard', 'modern', 'commander')."
+            + FORMAT_FILTER_CAVEAT
+        ),
     ],
     budget: Annotated[float | None, Field(description="Maximum price per card in USD")] = None,
     limit: Annotated[int, Field(description="Maximum number of suggestions")] = 20,
@@ -792,7 +799,10 @@ async def complete_deck(
     ],
     format: Annotated[
         str,
-        Field(description="Format to build for (e.g. 'standard', 'modern', 'commander')"),
+        Field(
+            description="Format to build for (e.g. 'standard', 'modern', 'commander')."
+            + FORMAT_FILTER_CAVEAT
+        ),
     ],
     commander: Annotated[
         str | None, Field(description="Commander name (required for Commander format)")
@@ -886,7 +896,11 @@ async def tribal_staples(
         str | None, Field(description="Color identity filter (e.g. 'sultai', 'WR')")
     ] = None,
     format: Annotated[
-        str | None, Field(description="Format legality filter (e.g. 'commander', 'modern')")
+        str | None,
+        Field(
+            description="Format legality filter (e.g. 'commander', 'modern')."
+            + FORMAT_FILTER_CAVEAT
+        ),
     ] = None,
     limit: Annotated[int, Field(description="Maximum number of results")] = 20,
     response_format: Annotated[
@@ -1677,7 +1691,11 @@ async def deck_audit_bundle(
 async def suggest_mana_base(
     decklist: Annotated[list[str], Field(description="Non-land card names in the deck")],
     format: Annotated[
-        str, Field(description="Format for land legality checking (e.g. 'commander', 'modern')")
+        str,
+        Field(
+            description="Format for land legality checking (e.g. 'commander', 'modern')."
+            + FORMAT_FILTER_CAVEAT
+        ),
     ],
     total_lands: Annotated[
         int | None,

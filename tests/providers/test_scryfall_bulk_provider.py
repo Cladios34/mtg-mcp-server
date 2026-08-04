@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -11,6 +12,9 @@ from fastmcp import Client
 from mtg_mcp_server.providers.scryfall_bulk import scryfall_bulk_mcp
 from mtg_mcp_server.services.scryfall_bulk import ScryfallBulkError
 from mtg_mcp_server.types import Card, CardPrices
+
+if TYPE_CHECKING:
+    from mtg_mcp_server.utils.unreleased import UnreleasedCollector
 
 
 def _make_card(
@@ -30,6 +34,8 @@ def _make_card(
     legalities: dict[str, str] | None = None,
     edhrec_rank: int | None = 1,
     keywords: list[str] | None = None,
+    released_at: str | None = None,
+    digital: bool = False,
 ) -> Card:
     """Build a Card instance for testing."""
     return Card(
@@ -49,6 +55,8 @@ def _make_card(
         legalities=legalities or {"commander": "legal", "modern": "legal"},
         edhrec_rank=edhrec_rank,
         keywords=keywords or [],
+        released_at=released_at,
+        digital=digital,
     )
 
 
@@ -521,16 +529,23 @@ def _make_pool_client(pool: list[Card] | None = None) -> AsyncMock:
         color_identity: frozenset[str] | None = None,
         type_contains: str | None = None,
         rarity: str | None = None,
+        unreleased: UnreleasedCollector | None = None,
     ) -> Card | None:
         pool = list(cards)
-        if format is not None:
-            pool = [c for c in pool if c.legalities.get(format) == "legal"]
         if color_identity is not None:
             pool = [c for c in pool if frozenset(c.color_identity).issubset(color_identity)]
         if type_contains is not None:
             pool = [c for c in pool if type_contains.lower() in c.type_line.lower()]
         if rarity is not None:
             pool = [c for c in pool if c.rarity == rarity]
+        if format is not None:
+            # Mirror the real service: cards failing ONLY the legality check are
+            # offered to the collector before being dropped.
+            if unreleased is not None:
+                for c in pool:
+                    if c.legalities.get(format) != "legal":
+                        unreleased.consider(c)
+            pool = [c for c in pool if c.legalities.get(format) == "legal"]
         return pool[0] if pool else None
 
     mock.get_card = AsyncMock(side_effect=mock_get_card)
@@ -1611,3 +1626,171 @@ class TestSimilarCardsConcise:
         assert isinstance(sc, dict)
         assert sc["source_card"] == "Lightning Bolt"
         assert isinstance(sc["similar"], list)
+
+
+# ---------------------------------------------------------------------------
+# Unreleased-card guard (format filters must name what they hide)
+# ---------------------------------------------------------------------------
+
+
+class TestUnreleasedGuard:
+    """A format filter hides cards from unreleased sets; the response must say which.
+
+    Same regression origin as scryfall_search_cards (2026-07-30): Darksteel Angel,
+    set 'frc' releasing 2026-10-02, is not_legal in every format until then and
+    vanished from every legality-filtered discovery search. Dates are frozen via
+    utc_today so these tests do not rot when the set actually releases.
+    """
+
+    _TODAY = "2026-08-04"
+
+    @staticmethod
+    def _angel_pool() -> list[Card]:
+        serra = _make_card(
+            name="Serra Angel",
+            mana_cost="{3}{W}{W}",
+            cmc=5.0,
+            type_line="Creature — Angel",
+            oracle_text="Flying, vigilance",
+            colors=["W"],
+            color_identity=["W"],
+            keywords=["Flying", "Vigilance"],
+            released_at="1993-08-05",
+        )
+        darksteel = _make_card(
+            name="Darksteel Angel",
+            mana_cost="{5}{W}",
+            cmc=6.0,
+            type_line="Artifact Creature — Angel",
+            oracle_text="Flying, indestructible",
+            colors=["W"],
+            color_identity=["W"],
+            keywords=["Flying", "Indestructible"],
+            legalities={"commander": "not_legal", "modern": "not_legal"},
+            released_at="2026-10-02",
+        )
+        return [serra, darksteel]
+
+    def _frozen_client(self, pool: list[Card]):
+        """Patch both the service constructor and today's date."""
+        mock = _make_pool_client(pool)
+        service_patch = patch(
+            "mtg_mcp_server.providers.scryfall_bulk.ScryfallBulkClient", return_value=mock
+        )
+        date_patch = patch("mtg_mcp_server.utils.unreleased.utc_today", return_value=self._TODAY)
+        return mock, service_patch, date_patch
+
+    async def test_format_search_names_excluded_unreleased_cards(self):
+        """The filter is respected AND the hidden card is named."""
+        _, service_patch, date_patch = self._frozen_client(self._angel_pool())
+        with service_patch, date_patch:
+            async with Client(transport=scryfall_bulk_mcp) as client:
+                result = await client.call_tool(
+                    "format_search", {"format": "commander", "query": "Angel"}
+                )
+        text = result.content[0].text
+        assert "Serra Angel" in text
+        assert "Darksteel Angel" in text
+        assert "not_legal" in text
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert sc["unreleased_excluded"] == ["Darksteel Angel"]
+        assert all(c["name"] != "Darksteel Angel" for c in sc["cards"])
+
+    async def test_format_search_empty_result_is_annotated_not_an_error(self):
+        """The dangerous case: 0 results must not read as 'this card does not exist'."""
+        _, service_patch, date_patch = self._frozen_client(self._angel_pool())
+        with service_patch, date_patch:
+            async with Client(transport=scryfall_bulk_mcp) as client:
+                result = await client.call_tool(
+                    "format_search",
+                    {"format": "commander", "query": "Darksteel Angel"},
+                    raise_on_error=False,
+                )
+        assert not result.is_error
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert sc["total_results"] == 0
+        assert sc["unreleased_excluded"] == ["Darksteel Angel"]
+        assert "Darksteel Angel" in result.content[0].text
+
+    async def test_format_search_reports_empty_list_when_nothing_hidden(self):
+        """Checked-and-found-nothing is [], a different claim from null."""
+        _, service_patch, date_patch = self._frozen_client(self._angel_pool())
+        with service_patch, date_patch:
+            async with Client(transport=scryfall_bulk_mcp) as client:
+                result = await client.call_tool(
+                    "format_search", {"format": "commander", "query": "Serra"}
+                )
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert sc["unreleased_excluded"] == []
+
+    async def test_similar_cards_names_excluded_unreleased_cards(self):
+        _, service_patch, date_patch = self._frozen_client(self._angel_pool())
+        with service_patch, date_patch:
+            async with Client(transport=scryfall_bulk_mcp) as client:
+                result = await client.call_tool(
+                    "similar_cards", {"card_name": "Serra Angel", "format": "commander"}
+                )
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert sc["unreleased_excluded"] == ["Darksteel Angel"]
+        assert "Darksteel Angel" in result.content[0].text
+
+    async def test_similar_cards_without_format_makes_no_claim(self):
+        """No legality filter, no probe: None, not [] — nothing was checked."""
+        _, service_patch, date_patch = self._frozen_client(self._angel_pool())
+        with service_patch, date_patch:
+            async with Client(transport=scryfall_bulk_mcp) as client:
+                result = await client.call_tool("similar_cards", {"card_name": "Serra Angel"})
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert sc["unreleased_excluded"] is None
+        # Without the filter the unreleased card is simply a result.
+        assert any(c["name"] == "Darksteel Angel" for c in sc["similar"])
+
+    async def test_random_card_empty_pool_is_annotated_not_an_error(self):
+        """Only unreleased cards match: the answer is 'hidden by your filter',
+        never 'no such cards'."""
+        pool = [c for c in self._angel_pool() if c.name == "Darksteel Angel"]
+        _, service_patch, date_patch = self._frozen_client(pool)
+        with service_patch, date_patch:
+            async with Client(transport=scryfall_bulk_mcp) as client:
+                result = await client.call_tool(
+                    "random_card",
+                    {"format": "commander", "card_type": "Angel"},
+                    raise_on_error=False,
+                )
+        assert not result.is_error
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert sc["card"] is None
+        assert sc["unreleased_excluded"] == ["Darksteel Angel"]
+        assert "Darksteel Angel" in result.content[0].text
+
+    async def test_random_card_result_carries_the_field(self):
+        _, service_patch, date_patch = self._frozen_client(self._angel_pool())
+        with service_patch, date_patch:
+            async with Client(transport=scryfall_bulk_mcp) as client:
+                result = await client.call_tool(
+                    "random_card", {"format": "commander", "card_type": "Angel"}
+                )
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert sc["name"] == "Serra Angel"
+        assert sc["unreleased_excluded"] == ["Darksteel Angel"]
+
+    async def test_format_legality_still_reports_not_legal(self):
+        """Family B non-regression: validation tools must keep answering not_legal —
+        that IS the requested information, not a side effect to correct."""
+        _, service_patch, date_patch = self._frozen_client(self._angel_pool())
+        with service_patch, date_patch:
+            async with Client(transport=scryfall_bulk_mcp) as client:
+                result = await client.call_tool(
+                    "format_legality",
+                    {"cards": ["Darksteel Angel"], "format": "commander"},
+                    raise_on_error=False,
+                )
+        text = result.content[0].text.lower()
+        assert "not legal" in text or "not_legal" in text

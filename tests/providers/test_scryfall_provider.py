@@ -582,3 +582,117 @@ class TestProbeNeverCostsTheAnswer:
         text = result.content[0].text
         assert "57 such card(s)" in text
         assert "showing 1 of them" in text
+
+
+class TestWhatsNewUnreleased:
+    """whats_new's format parameter hides unreleased cards; the response must say which.
+
+    Reproduction (2026-08-04, production v3.0.0): whats_new(days=30, set_code='frc')
+    returned Darksteel Angel (releases 2026-10-02); the same call with
+    format='commander' returned the error "No new cards found ... in format
+    'commander'" — an error that reads as absence when the card exists.
+    """
+
+    @staticmethod
+    def _route(main_response, probe_response):
+        """Dispatch on the query: only the probe carries `-is:funny`.
+
+        The main whats_new query already contains `date>=`, so the `date>`
+        discriminator used by the search_cards tests would misroute it.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "-is:funny" in request.url.params.get("q", ""):
+                return probe_response
+            return main_response
+
+        return handler
+
+    @respx.mock
+    async def test_format_filter_names_excluded_unreleased_cards(self, client: Client):
+        """A successful search still warns about what the format filter hid."""
+        main = _load_fixture("search_sultai_commander.json")
+        hidden = {
+            **main,
+            "data": [{**main["data"][0], "name": "Darksteel Angel"}],
+            "total_cards": 1,
+        }
+        respx.get(f"{BASE_URL}/cards/search").mock(
+            side_effect=self._route(
+                httpx.Response(200, json=main), httpx.Response(200, json=hidden)
+            )
+        )
+
+        result = await client.call_tool("whats_new", {"days": 30, "format": "commander"})
+
+        text = result.content[0].text
+        assert "Darksteel Angel" in text
+        assert "not_legal" in text
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert sc["unreleased_excluded"] == ["Darksteel Angel"]
+
+    @respx.mock
+    async def test_empty_result_with_format_is_annotated_not_an_error(self, client: Client):
+        """The reproduction case: 0 results + format must carry unreleased_excluded,
+        never a bare error that reads as 'these cards do not exist'."""
+        main = _load_fixture("search_sultai_commander.json")
+        hidden = {
+            **main,
+            "data": [{**main["data"][0], "name": "Darksteel Angel"}],
+            "total_cards": 1,
+        }
+        not_found = httpx.Response(
+            404, json={"object": "error", "code": "not_found", "details": ""}
+        )
+        respx.get(f"{BASE_URL}/cards/search").mock(
+            side_effect=self._route(not_found, httpx.Response(200, json=hidden))
+        )
+
+        result = await client.call_tool(
+            "whats_new",
+            {"days": 30, "set_code": "frc", "format": "commander"},
+            raise_on_error=False,
+        )
+
+        assert not result.is_error
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert sc["total_cards"] == 0
+        assert sc["cards"] == []
+        assert sc["unreleased_excluded"] == ["Darksteel Angel"]
+        assert "Darksteel Angel" in result.content[0].text
+
+    @respx.mock
+    async def test_empty_result_without_hidden_cards_stays_an_error(self, client: Client):
+        """When the probe finds nothing, the original error is the honest answer."""
+        main = _load_fixture("search_sultai_commander.json")
+        empty_probe = {**main, "data": [], "total_cards": 0}
+        not_found = httpx.Response(
+            404, json={"object": "error", "code": "not_found", "details": ""}
+        )
+        respx.get(f"{BASE_URL}/cards/search").mock(
+            side_effect=self._route(not_found, httpx.Response(200, json=empty_probe))
+        )
+
+        result = await client.call_tool(
+            "whats_new", {"days": 1, "format": "commander"}, raise_on_error=False
+        )
+        assert result.is_error
+        assert "no new cards found" in result.content[0].text.lower()
+
+    @respx.mock
+    async def test_no_probe_without_format(self, client: Client):
+        """No format filter means nothing was hidden on that count, and no extra call."""
+        fixture = _load_fixture("search_sultai_commander.json")
+        route = respx.get(f"{BASE_URL}/cards/search").mock(
+            return_value=httpx.Response(200, json=fixture)
+        )
+
+        result = await client.call_tool("whats_new", {"days": 30})
+
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        # None, not []: no probe ran, so we make no claim about what is unreleased.
+        assert sc["unreleased_excluded"] is None
+        assert route.call_count == 1

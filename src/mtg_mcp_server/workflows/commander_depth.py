@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Literal
 import structlog
 
 from mtg_mcp_server.utils.color_identity import is_within_identity, parse_color_identity
+from mtg_mcp_server.utils.unreleased import UnreleasedCollector
 from mtg_mcp_server.workflows import WorkflowResult
 from mtg_mcp_server.workflows.commander import _fmt_synergy
 
@@ -438,12 +439,17 @@ async def tribal_staples(
     # 3. Best members: creatures of the tribe type
     members_task = bulk.search_by_type(tribe, limit=limit * 3)
 
+    # Collects cards the format filter alone rejected — both from filter_cards
+    # below and from the _filter pass over the other three category searches.
+    collector = UnreleasedCollector(active=format is not None)
+
     # 4. Tribal support: "Kindred" or "choose a creature type"
     support_task = bulk.filter_cards(
         text_any=["kindred", "choose a creature type", "chosen type"],
         format=format,
         color_identity=identity,
         limit=limit,
+        unreleased=collector,
     )
 
     lords_result, synergy_result, members_result, support_result = await asyncio.gather(
@@ -457,6 +463,9 @@ async def tribal_staples(
             if identity is not None and not is_within_identity(card.color_identity, identity):
                 continue
             if format is not None and card.legalities.get(format) != "legal":
+                # Legality is the LAST check here, so an unreleased reject already
+                # passed every other criterion: name it instead of dropping it.
+                collector.consider(card)
                 continue
             filtered.append(card)
         return filtered
@@ -508,6 +517,10 @@ async def tribal_staples(
     # Format output
     total_found = sum(len(cards) for _, cards in capped_categories)
     lines = _format_tribal_staples(tribe, capped_categories, total_found, response_format)
+    note = collector.note(format or "")
+    if note:
+        lines.append("")
+        lines.append(note)
 
     log.info("tribal_staples.complete", tribe=tribe, total=total_found)
     data = {
@@ -515,6 +528,7 @@ async def tribal_staples(
         "color_identity": color_identity,
         "format": format,
         "total_found": total_found,
+        "unreleased_excluded": collector.field(),
         "categories": [
             {
                 "name": cat_name,
