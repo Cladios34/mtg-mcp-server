@@ -138,6 +138,36 @@ class TestFindDecklistCombos:
         assert isinstance(result.almost_included, list)
 
     @respx.mock
+    async def test_quantity_prefixed_entries_send_bare_names(self):
+        """Quantity-prefixed entries ("1 Card Name" / "4x Card Name") are parsed before hitting Spellbook.
+
+        Spellbook's ``card`` field is a name lookup: a literal "1 Sol Ring"
+        never matches "Sol Ring" upstream, so the API silently returns empty
+        results for entries in this format (no error, worked around live by
+        passing bare names — see mistake note 2026-07-22). find-my-combos and
+        estimate-bracket must normalize entries the same way deck_validate
+        and every other decklist-consuming workflow already does.
+        """
+        fixture = _load_fixture("find_my_combos_response.json")
+        route = respx.post(f"{BASE_URL}/find-my-combos").mock(
+            return_value=httpx.Response(200, json=fixture)
+        )
+
+        async with SpellbookClient(base_url=BASE_URL) as client:
+            await client.find_decklist_combos(
+                commanders=["1 Muldrotha, the Gravetide"],
+                decklist=["1 Sol Ring", "4x Spore Frog", "Altar of Dementia"],
+            )
+
+        sent_body = json.loads(route.calls[0].request.content)
+        assert sent_body["commanders"] == [{"card": "Muldrotha, the Gravetide", "quantity": 1}]
+        assert sent_body["main"] == [
+            {"card": "Sol Ring", "quantity": 1},
+            {"card": "Spore Frog", "quantity": 4},
+            {"card": "Altar of Dementia", "quantity": 1},
+        ]
+
+    @respx.mock
     async def test_null_popularity_parses(self):
         """A combo with popularity: null parses instead of failing the whole response.
 

@@ -12,6 +12,7 @@ from cachetools import TTLCache
 from mtg_mcp_server.services.base import DEFAULT_USER_AGENT, BaseClient, ServiceError
 from mtg_mcp_server.services.cache import _decklist_key, _method_key, async_cached
 from mtg_mcp_server.types import BracketEstimate, Combo, ComboCard, ComboResult, DecklistCombos
+from mtg_mcp_server.utils.decklist import parse_decklist
 
 
 class SpellbookError(ServiceError):
@@ -77,17 +78,21 @@ def _build_decklist_body(commanders: list[str], decklist: list[str]) -> dict:
     """Build the JSON body for ``/find-my-combos`` and ``/estimate-bracket``.
 
     The API expects ``{"commanders": [{"card": ..., "quantity": 1}], "main": [...]}``.
+    ``card`` is a literal name lookup upstream: entries are parsed through
+    ``parse_decklist`` first so "1 Sol Ring" / "4x Spore Frog" resolve to the
+    bare name (matching every other decklist-consuming tool in this codebase)
+    instead of silently matching nothing.
 
     Args:
-        commanders: Commander card names.
-        decklist: Main deck card names.
+        commanders: Commander card names, optionally quantity-prefixed.
+        decklist: Main deck card names, optionally quantity-prefixed.
 
     Returns:
         Request body dict ready for ``json=`` in httpx.
     """
     return {
-        "commanders": [{"card": name, "quantity": 1} for name in commanders],
-        "main": [{"card": name, "quantity": 1} for name in decklist],
+        "commanders": [{"card": name, "quantity": qty} for qty, name in parse_decklist(commanders)],
+        "main": [{"card": name, "quantity": qty} for qty, name in parse_decklist(decklist)],
     }
 
 
