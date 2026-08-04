@@ -50,6 +50,12 @@ from mtg_mcp_server.services.spellbook import SpellbookClient
 from mtg_mcp_server.services.spicerack import SpicerackClient
 from mtg_mcp_server.utils.unreleased import FORMAT_FILTER_CAVEAT
 
+# Shared description for the include_unreleased switch on discovery tools.
+_INCLUDE_UNRELEASED_DESC = (
+    "Include cards from sets not yet released, marked [UNRELEASED] (default true). "
+    "Set false to restrict to currently-legal cards."
+)
+
 # Module-level clients managed by the lifespan via AsyncExitStack.
 # Workflows need multiple clients simultaneously; AsyncExitStack is cleaner
 # than nested `async with` blocks when some clients are feature-flagged.
@@ -715,6 +721,7 @@ async def theme_search(
     ] = None,
     max_price: Annotated[float | None, Field(description="Maximum card price in USD")] = None,
     limit: Annotated[int, Field(description="Maximum number of results")] = 20,
+    include_unreleased: Annotated[bool, Field(description=_INCLUDE_UNRELEASED_DESC)] = True,
     response_format: Annotated[
         Literal["detailed", "concise"],
         Field(description="Output verbosity: 'detailed' (default) or 'concise'"),
@@ -738,6 +745,7 @@ async def theme_search(
             format=format,
             max_price=max_price,
             limit=limit,
+            include_unreleased=include_unreleased,
             response_format=response_format,
         )
         return ToolResult(content=result.markdown, structured_content=result.data)
@@ -757,6 +765,7 @@ async def build_around(
     ],
     budget: Annotated[float | None, Field(description="Maximum price per card in USD")] = None,
     limit: Annotated[int, Field(description="Maximum number of suggestions")] = 20,
+    include_unreleased: Annotated[bool, Field(description=_INCLUDE_UNRELEASED_DESC)] = True,
     response_format: Annotated[
         Literal["detailed", "concise"],
         Field(description="Output verbosity: 'detailed' (default) or 'concise'"),
@@ -783,6 +792,7 @@ async def build_around(
             spellbook=_require_spellbook(),
             budget=budget,
             limit=limit,
+            include_unreleased=include_unreleased,
             response_format=response_format,
         )
         return ToolResult(content=result.markdown, structured_content=result.data)
@@ -810,6 +820,7 @@ async def complete_deck(
     budget: Annotated[
         float | None, Field(description="Maximum price per suggested card in USD")
     ] = None,
+    include_unreleased: Annotated[bool, Field(description=_INCLUDE_UNRELEASED_DESC)] = True,
     response_format: Annotated[
         Literal["detailed", "concise"],
         Field(description="Output verbosity: 'detailed' (default) or 'concise'"),
@@ -834,6 +845,7 @@ async def complete_deck(
             bulk=_require_bulk(),
             commander=commander,
             budget=budget,
+            include_unreleased=include_unreleased,
             on_progress=lambda step, total: _progress(ctx, step, total),
             response_format=response_format,
         )
@@ -903,6 +915,7 @@ async def tribal_staples(
         ),
     ] = None,
     limit: Annotated[int, Field(description="Maximum number of results")] = 20,
+    include_unreleased: Annotated[bool, Field(description=_INCLUDE_UNRELEASED_DESC)] = True,
     response_format: Annotated[
         Literal["detailed", "concise"],
         Field(description="Output verbosity: 'detailed' (default) or 'concise'"),
@@ -925,6 +938,7 @@ async def tribal_staples(
             color_identity=color_identity,
             format=format,
             limit=limit,
+            include_unreleased=include_unreleased,
             response_format=response_format,
         )
         return ToolResult(content=result.markdown, structured_content=result.data)
@@ -1701,6 +1715,7 @@ async def suggest_mana_base(
         int | None,
         Field(description="Override total land count (default: auto-calculated from avg CMC)"),
     ] = None,
+    include_unreleased: Annotated[bool, Field(description=_INCLUDE_UNRELEASED_DESC)] = True,
     response_format: Annotated[
         Literal["detailed", "concise"],
         Field(description="Output verbosity: 'detailed' (default) or 'concise'"),
@@ -1722,6 +1737,7 @@ async def suggest_mana_base(
             format,
             total_lands=total_lands,
             bulk=_require_bulk(),
+            include_unreleased=include_unreleased,
             response_format=response_format,
         )
         return ToolResult(content=result.markdown, structured_content=result.data)

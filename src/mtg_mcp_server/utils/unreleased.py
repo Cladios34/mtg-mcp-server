@@ -23,10 +23,16 @@ if TYPE_CHECKING:
 
 # Appended to the `format` parameter description of every discovery tool. This is the
 # only part of the guard that protects a caller who never reads the response body.
+# DECISION(2026-08-04, owner): discovery results INCLUDE unreleased cards by default,
+# marked as such — Scryfall marks them not_legal everywhere until release day, and a
+# spoiled card silently missing already cost a real deck analysis. Validation tools
+# stay strict on purpose.
 FORMAT_FILTER_CAVEAT = (
-    " WARNING: this is a legality filter — it also excludes cards from sets not yet "
-    "released, which Scryfall marks not_legal in every format until release day. Omit "
-    "it for discovery searches; cards it removed are listed in `unreleased_excluded`."
+    " NOTE: cards from sets not yet released (which Scryfall marks not_legal in every "
+    "format until release day) are still INCLUDED by default, marked unreleased and "
+    "listed in `unreleased_included`. Pass include_unreleased=false to restrict "
+    "results to currently-legal cards; the removed ones are then named in "
+    "`unreleased_excluded`."
 )
 
 # One page of names is plenty for a warning; the point is naming cards, not paging them.
@@ -115,12 +121,90 @@ class UnreleasedCollector:
         return [card.name for card in self.cards]
 
     def field(self) -> list[str] | None:
-        """The ``unreleased_excluded`` value: None when no legality filter was active."""
+        """The ``unreleased_excluded``/``unreleased_included`` value.
+
+        None when no legality filter was active (nothing was checked); a list —
+        possibly empty — when one was. Only ``[]`` means "checked, found nothing".
+        """
         return self.names if self.active else None
+
+    def marker(self, name: str) -> str:
+        """Suffix marking a result line as unreleased, or '' for released cards.
+
+        Includes the release date when known: "releases someday" is not actionable,
+        "releases 2026-10-02" is.
+        """
+        for card in self.cards:
+            if card.name == name:
+                when = f" — releases {card.released_at}" if card.released_at else ""
+                return f" [UNRELEASED{when}]"
+        return ""
 
     def note(self, format_name: str) -> str | None:
         """Markdown warning naming the excluded cards, or None when there are none."""
         return unreleased_param_note(self.names, format_name)
+
+    def note_included(self, format_name: str) -> str | None:
+        """Markdown note naming the INCLUDED unreleased cards, or None when there are none."""
+        return unreleased_included_note(self.names, format_name)
+
+
+def upcoming_section(
+    cards: list[Card], total: int | None, format_name: str, cap: int = UNRELEASED_CAP
+) -> list[str]:
+    """Markdown section listing upcoming cards a Scryfall-API probe found.
+
+    Used by the API-backed tools (search_cards, whats_new), where upcoming cards
+    come from a second query and cannot be interleaved with the remotely-sorted
+    main results. Capped: one page of names is a warning, not a catalogue — the
+    total is stated so the cap is never silent.
+    """
+    if not cards:
+        return []
+    count = total if total is not None else len(cards)
+    lines = [
+        f"### Upcoming cards ({count} match(es) — not_legal in '{format_name}' "
+        f"until their set's release day):"
+    ]
+    for card in cards[:cap]:
+        set_label = f" [{card.set_code.upper()}]" if card.set_code else ""
+        when = f", releases {card.released_at}" if card.released_at else ""
+        lines.append(f"  {card.name} — {card.type_line}{set_label}{when}")
+    if count > min(len(cards), cap):
+        lines.append(
+            f"  ... and {count - min(len(cards), cap)} more (narrow the query to see them)"
+        )
+    return lines
+
+
+def merge_included(results: list[Card], collector: UnreleasedCollector) -> list[Card]:
+    """Results plus any collected unreleased cards that a limit or sort pushed out.
+
+    An upcoming card that matched every criterion must stay VISIBLE (owner default):
+    ranked sorts bury it (no EDHREC rank yet) and limits then cut it, which would
+    re-create the silent disappearance this guard exists to prevent. Collected cards
+    are capped, so this adds at most a handful of entries past the limit.
+    """
+    have = {card.name for card in results}
+    return results + [card for card in collector.cards if card.name not in have]
+
+
+def unreleased_included_note(names: list[str], format_name: str) -> str | None:
+    """Markdown note naming the unreleased cards a discovery tool INCLUDED.
+
+    Inclusion is the owner default; the note keeps it honest: an upcoming card in a
+    "legal in X" list without a caveat would claim a legality it does not have yet.
+    """
+    if not names:
+        return None
+    listed = ", ".join(names)
+    return (
+        f"NOTE: {len(names)} card(s) from sets not yet released are included and "
+        f"marked [UNRELEASED]: {listed}. Scryfall marks them not_legal in "
+        f"'{format_name}' until their set's release day — they cannot be played in "
+        f"sanctioned games before then. Pass include_unreleased=false to restrict "
+        f"results to currently-legal cards."
+    )
 
 
 def unreleased_param_note(

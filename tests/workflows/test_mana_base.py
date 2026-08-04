@@ -491,8 +491,9 @@ class TestUnreleasedGuard:
             list(self._two_color_deck().keys()), "commander", bulk=mock_bulk
         )
 
-        assert result.data["unreleased_excluded"] == ["Darksteel Citadel Bridge"]
+        assert result.data["unreleased_included"] == ["Darksteel Citadel Bridge"]
         assert "Darksteel Citadel Bridge" in result.markdown
+        assert "[UNRELEASED" in result.markdown
         assert "Upcoming Mono Land" not in result.markdown
 
     async def test_mono_color_deck_makes_no_claim(self) -> None:
@@ -507,4 +508,4 @@ class TestUnreleasedGuard:
 
         result = await suggest_mana_base(list(cards.keys()), "commander", bulk=mock_bulk)
 
-        assert result.data["unreleased_excluded"] is None
+        assert result.data["unreleased_included"] is None

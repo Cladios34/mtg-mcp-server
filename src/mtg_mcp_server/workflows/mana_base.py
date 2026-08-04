@@ -14,7 +14,11 @@ import structlog
 from mtg_mcp_server.utils.decklist import parse_decklist
 from mtg_mcp_server.utils.format_rules import normalize_format
 from mtg_mcp_server.utils.mana import count_pips, suggest_land_count
-from mtg_mcp_server.utils.unreleased import UnreleasedCollector, unreleased_param_note
+from mtg_mcp_server.utils.unreleased import (
+    UnreleasedCollector,
+    unreleased_included_note,
+    unreleased_param_note,
+)
 from mtg_mcp_server.workflows import WorkflowResult
 
 if TYPE_CHECKING:
@@ -46,6 +50,7 @@ async def suggest_mana_base(
     *,
     total_lands: int | None = None,
     bulk: ScryfallBulkClient,
+    include_unreleased: bool = True,
     response_format: Literal["detailed", "concise"] = "detailed",
 ) -> WorkflowResult:
     """Suggest a mana base based on color pip distribution.
@@ -155,6 +160,7 @@ async def suggest_mana_base(
                 color_identity=frozenset(deck_colors),
                 limit=20,
                 unreleased=collector,
+                include_unreleased=include_unreleased,
             )
         except Exception:
             log.warning("suggest_mana_base.dual_land_search_failed", format=fmt)
@@ -170,6 +176,15 @@ async def suggest_mana_base(
             for card in collector.cards
             if card.color_identity and len(card.color_identity) >= 2
         ]
+        if include_unreleased:
+            # An upcoming dual the cut pushed out is merged back: silently losing it
+            # is the failure mode this guard exists for.
+            have = {card.name for card in dual_lands}
+            dual_lands += [
+                card
+                for card in collector.cards
+                if card.name in set(unreleased_duals) and card.name not in have
+            ]
 
     # --- Heavy color warnings ---
     heavy_warnings: list[str] = []
@@ -225,13 +240,20 @@ async def suggest_mana_base(
         if dual_lands:
             lines.append("## Recommended Dual Lands")
             lines.append("")
+            upcoming = set(unreleased_duals or [])
             for card in dual_lands:
                 colors = ", ".join(card.color_identity)
                 price = f"${card.prices.usd}" if card.prices.usd is not None else "N/A"
-                lines.append(f"- **{card.name}** ({colors}) - {price}")
+                when = f" — releases {card.released_at}" if card.released_at else ""
+                mark = f" [UNRELEASED{when}]" if card.name in upcoming else ""
+                lines.append(f"- **{card.name}** ({colors}) - {price}{mark}")
             lines.append("")
 
-        dual_note = unreleased_param_note(unreleased_duals or [], fmt)
+        dual_note = (
+            unreleased_included_note(unreleased_duals or [], fmt)
+            if include_unreleased
+            else unreleased_param_note(unreleased_duals or [], fmt)
+        )
         if dual_note:
             lines.append(dual_note)
             lines.append("")
@@ -262,7 +284,7 @@ async def suggest_mana_base(
             {"name": c.name, "color_identity": list(c.color_identity), "price_usd": c.prices.usd}
             for c in dual_lands
         ],
-        "unreleased_excluded": unreleased_duals,
+        ("unreleased_included" if include_unreleased else "unreleased_excluded"): unreleased_duals,
         "heavy_warnings": heavy_warnings,
         "resolved_count": resolved_count,
         "unresolved_count": unresolved_count,

@@ -41,7 +41,11 @@ from mtg_mcp_server.utils.mechanics import has_creature_type
 from mtg_mcp_server.utils.query_parser import parse_query
 from mtg_mcp_server.utils.query_sanitize import looks_like_scryfall_syntax
 from mtg_mcp_server.utils.slim import slim_card
-from mtg_mcp_server.utils.unreleased import FORMAT_FILTER_CAVEAT, UnreleasedCollector
+from mtg_mcp_server.utils.unreleased import (
+    FORMAT_FILTER_CAVEAT,
+    UnreleasedCollector,
+    merge_included,
+)
 
 # Lightweight format alias map — maps common abbreviations to Scryfall legality
 # keys. Unlike utils.format_rules.normalize_format, this does NOT reject unknown
@@ -378,6 +382,13 @@ async def format_search(
         Field(description="Rarity filter (e.g. 'common', 'uncommon', 'rare', 'mythic')"),
     ] = None,
     limit: Annotated[int, Field(description="Maximum results to return")] = 20,
+    include_unreleased: Annotated[
+        bool,
+        Field(
+            description="Include cards from sets not yet released, marked [UNRELEASED] "
+            "(default true). Set false to restrict to currently-legal cards."
+        ),
+    ] = True,
     response_format: Annotated[
         ResponseFormat,
         Field(description="Output verbosity: 'detailed' (default) or 'concise'"),
@@ -387,7 +398,8 @@ async def format_search(
 
     Combines format legality filtering with name/type/text search and
     optional color identity, price, and rarity constraints. Results are
-    sorted by EDHREC rank (most popular first).
+    sorted by EDHREC rank (most popular first). Cards from unreleased sets
+    are included by default and marked [UNRELEASED].
     """
     if not query.strip():
         raise ToolError("Provide a search query.")
@@ -465,7 +477,8 @@ async def format_search(
 
         if not legal:
             collector.collect(card)
-            continue
+            if not include_unreleased:
+                continue
         matches.append(card)
         if len(matches) >= MAX_CANDIDATES:
             break
@@ -481,13 +494,17 @@ async def format_search(
     # Sort by EDHREC rank (lower = more popular), None last
     matches.sort(key=lambda c: (c.edhrec_rank is None, c.edhrec_rank or 0))
     matches = matches[:limit]
+    if include_unreleased:
+        # An upcoming card has no EDHREC rank, sorts last and would be cut by the
+        # limit — re-creating the silent disappearance this guard exists to prevent.
+        matches = merge_included(matches, collector)
 
     desc = parsed.description or query
     lines = [f"## {fmt.title()} Cards: {desc}"]
     if color_identity:
         lines[0] += f" ({color_identity})"
     lines.append(f"Found {len(matches)} result(s):")
-    note = collector.note(fmt)
+    note = collector.note_included(fmt) if include_unreleased else collector.note(fmt)
     if note:
         # The empty-result case is the dangerous one: without this note, "0 results"
         # reads as "these cards do not exist" when the truth is the filter hid them.
@@ -495,14 +512,16 @@ async def format_search(
         lines.append(note)
     lines.append("")
     for card in matches:
+        mark = collector.marker(card.name)
         if response_format == "concise":
             cost = f" {card.mana_cost}" if card.mana_cost else ""
-            lines.append(f"  {card.name}{cost}")
+            lines.append(f"  {card.name}{cost}{mark}")
         else:
             cost = f" {card.mana_cost}" if card.mana_cost else ""
             price = f" (${card.prices.usd})" if card.prices.usd else ""
-            lines.append(f"  {card.name}{cost} -- {card.type_line}{price}")
+            lines.append(f"  {card.name}{cost} -- {card.type_line}{price}{mark}")
 
+    unreleased_key = "unreleased_included" if include_unreleased else "unreleased_excluded"
     return ToolResult(
         content="\n".join(lines) + ATTRIBUTION_SCRYFALL_BULK,
         structured_content={
@@ -510,7 +529,7 @@ async def format_search(
             "query": query,
             "color_identity": color_identity,
             "total_results": len(matches),
-            "unreleased_excluded": collector.field(),
+            unreleased_key: collector.field(),
             "cards": [slim_card(card) for card in matches],
         },
     )
@@ -841,6 +860,13 @@ async def similar_cards(
         Field(description="Maximum USD price filter"),
     ] = None,
     limit: Annotated[int, Field(description="Maximum results to return")] = 10,
+    include_unreleased: Annotated[
+        bool,
+        Field(
+            description="Include cards from sets not yet released, marked [UNRELEASED] "
+            "(default true). Set false to restrict to currently-legal cards."
+        ),
+    ] = True,
     response_format: Annotated[
         ResponseFormat,
         Field(description="Output verbosity: 'detailed' (default) or 'concise'"),
@@ -850,7 +876,8 @@ async def similar_cards(
 
     Scores similarity based on shared keywords, type words, CMC
     proximity, and oracle text overlap. Optionally filter by format
-    legality and price.
+    legality and price. With a format filter, cards from unreleased sets
+    are included by default and marked [UNRELEASED].
     """
     client = _get_client()
 
@@ -889,38 +916,51 @@ async def similar_cards(
         if score > 0:
             if not legal:
                 collector.collect(card)
-                continue
+                if not include_unreleased:
+                    continue
             scored.append((score, card))
 
     if not scored and not collector.names:
         raise ToolError(f"No similar cards found for '{source.name}'.")
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    top = scored[:limit]
+    if include_unreleased and collector.names:
+        # An upcoming card must not be cut by the limit: that silent disappearance
+        # is what this guard exists to prevent. Released cards fill the limit,
+        # collected upcoming ones ride along.
+        upcoming_names = set(collector.names)
+        top = [t for t in scored if t[1].name not in upcoming_names][:limit]
+        top += [t for t in scored if t[1].name in upcoming_names]
+    else:
+        top = scored[:limit]
 
     lines = [
         f"## Cards Similar to {source.name}",
         f"*{source.mana_cost or 'No cost'} -- {source.type_line}*",
         "",
     ]
-    note = collector.note(fmt or "")
+    note = collector.note_included(fmt or "") if include_unreleased else collector.note(fmt or "")
     if note:
         lines.append(note)
         lines.append("")
     for score, card in top:
+        mark = collector.marker(card.name)
         if response_format == "concise":
-            lines.append(f"  {card.name} (score: {score:.0f}%)")
+            lines.append(f"  {card.name} (score: {score:.0f}%){mark}")
         else:
             cost = f" {card.mana_cost}" if card.mana_cost else ""
             price = f" (${card.prices.usd})" if card.prices.usd else ""
-            lines.append(f"  {card.name}{cost} -- {card.type_line}{price} [score: {score:.1f}]")
+            lines.append(
+                f"  {card.name}{cost} -- {card.type_line}{price} [score: {score:.1f}]{mark}"
+            )
 
+    unreleased_key = "unreleased_included" if include_unreleased else "unreleased_excluded"
     return ToolResult(
         content="\n".join(lines) + ATTRIBUTION_SCRYFALL_BULK,
         structured_content={
             "source_card": source.name,
             "total_results": len(top),
-            "unreleased_excluded": collector.field(),
+            unreleased_key: collector.field(),
             "similar": [{"score": score, **slim_card(card)} for score, card in top],
         },
     )
@@ -949,10 +989,18 @@ async def random_card(
         str | None,
         Field(description="Rarity filter (e.g. 'common', 'uncommon', 'rare', 'mythic')"),
     ] = None,
+    include_unreleased: Annotated[
+        bool,
+        Field(
+            description="Let cards from sets not yet released be drawn, marked "
+            "[UNRELEASED] (default true). Set false to draw only currently-legal cards."
+        ),
+    ] = True,
 ) -> ToolResult:
     """Get a random Magic card, optionally filtered by format, color, type, and rarity.
 
-    Returns full card details in the same format as card_lookup.
+    Returns full card details in the same format as card_lookup. With a format
+    filter, cards from unreleased sets can be drawn by default (marked as such).
     """
     client = _get_client()
     fmt = normalize_format(format) if format else None
@@ -969,11 +1017,13 @@ async def random_card(
             type_contains=card_type,
             rarity=rarity.lower() if rarity else None,
             unreleased=collector,
+            include_unreleased=include_unreleased,
         )
     except ScryfallBulkError as exc:
         raise ToolError(f"Scryfall bulk data error: {exc}") from exc
 
-    note = collector.note(fmt or "")
+    unreleased_key = "unreleased_included" if include_unreleased else "unreleased_excluded"
+    note = collector.note_included(fmt or "") if include_unreleased else collector.note(fmt or "")
     if card is None:
         if note:
             # An empty pool with unreleased matches must not read as "no such cards":
@@ -981,11 +1031,14 @@ async def random_card(
             return ToolResult(
                 content=f"No released cards match the specified filters.\n\n{note}"
                 + ATTRIBUTION_SCRYFALL_BULK,
-                structured_content={"card": None, "unreleased_excluded": collector.field()},
+                structured_content={"card": None, unreleased_key: collector.field()},
             )
         raise ToolError("No cards match the specified filters.")
 
     lines = _format_card_detail_with_legalities(card)
+    drew_unreleased = collector.marker(card.name)
+    if drew_unreleased:
+        lines.insert(1, f"**{drew_unreleased.strip()}** — not_legal until release day.")
     if note:
         lines.append("")
         lines.append(note)
@@ -993,7 +1046,7 @@ async def random_card(
         content="\n".join(lines) + ATTRIBUTION_SCRYFALL_BULK,
         structured_content={
             **card.model_dump(mode="json"),
-            "unreleased_excluded": collector.field(),
+            unreleased_key: collector.field(),
         },
     )
 

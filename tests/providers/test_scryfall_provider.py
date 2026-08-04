@@ -489,7 +489,9 @@ class TestUnreleasedCardsWarning:
             side_effect=self._route(main, httpx.Response(200, json=hidden))
         )
 
-        result = await client.call_tool("search_cards", {"query": "t:angel f:commander"})
+        result = await client.call_tool(
+            "search_cards", {"query": "t:angel f:commander", "include_unreleased": False}
+        )
 
         text = result.content[0].text
         assert "Darksteel Angel" in text
@@ -498,6 +500,37 @@ class TestUnreleasedCardsWarning:
         assert isinstance(sc, dict)
         assert sc["legality_filter_detected"] is True
         assert sc["unreleased_excluded"] == ["Darksteel Angel"]
+
+    @respx.mock
+    async def test_default_mode_lists_the_upcoming_card(self, client: Client):
+        """Owner default: the upcoming card is LISTED in an Upcoming section."""
+        main = _load_fixture("search_sultai_commander.json")
+        hidden = {
+            **main,
+            "data": [
+                {
+                    **main["data"][0],
+                    "name": "Darksteel Angel",
+                    "type_line": "Artifact Creature - Angel",
+                }
+            ],
+            "total_cards": 1,
+            "has_more": False,
+        }
+        respx.get(f"{BASE_URL}/cards/search").mock(
+            side_effect=self._route(main, httpx.Response(200, json=hidden))
+        )
+
+        result = await client.call_tool("search_cards", {"query": "t:angel f:commander"})
+
+        text = result.content[0].text
+        assert "Upcoming cards" in text
+        assert "Darksteel Angel" in text
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert sc["legality_filter_detected"] is True
+        assert sc["unreleased_total"] == 1
+        assert [c["name"] for c in sc["unreleased_included"]] == ["Darksteel Angel"]
 
     @respx.mock
     async def test_no_probe_without_a_legality_filter(self, client: Client):
@@ -513,7 +546,7 @@ class TestUnreleasedCardsWarning:
         assert isinstance(sc, dict)
         assert sc["legality_filter_detected"] is False
         # None, not []: no probe ran, so we make no claim about what is unreleased.
-        assert sc["unreleased_excluded"] is None
+        assert sc["unreleased_included"] is None
         assert route.call_count == 1
 
     @respx.mock
@@ -529,7 +562,7 @@ class TestUnreleasedCardsWarning:
         sc = result.structured_content
         assert isinstance(sc, dict)
         assert sc["total_cards"] == 9273
-        assert sc["unreleased_excluded"] == []
+        assert sc["unreleased_included"] == []
 
 
 class TestProbeNeverCostsTheAnswer:
@@ -556,7 +589,7 @@ class TestProbeNeverCostsTheAnswer:
         sc = result.structured_content
         assert isinstance(sc, dict)
         assert sc["total_cards"] == 9273  # the answer survived
-        assert sc["unreleased_excluded"] == []
+        assert sc["unreleased_included"] == []
 
     @respx.mock
     async def test_the_count_comes_from_scryfall_not_from_the_page(self, client: Client):
@@ -577,11 +610,39 @@ class TestProbeNeverCostsTheAnswer:
 
         respx.get(f"{BASE_URL}/cards/search").mock(side_effect=handler)
 
-        result = await client.call_tool("search_cards", {"query": "t:angel f:commander"})
+        result = await client.call_tool(
+            "search_cards", {"query": "t:angel f:commander", "include_unreleased": False}
+        )
 
         text = result.content[0].text
         assert "57 such card(s)" in text
         assert "showing 1 of them" in text
+
+    @respx.mock
+    async def test_default_mode_states_scryfall_total_in_the_section(self, client: Client):
+        """Include mode states the measured total too, next to the one page shown."""
+        main = _load_fixture("search_sultai_commander.json")
+        hidden = {
+            **main,
+            "data": [{**main["data"][0], "name": "Darksteel Angel"}],
+            "total_cards": 57,
+            "has_more": True,
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "date>" in request.url.params.get("q", ""):
+                return httpx.Response(200, json=hidden)
+            return httpx.Response(200, json=main)
+
+        respx.get(f"{BASE_URL}/cards/search").mock(side_effect=handler)
+
+        result = await client.call_tool("search_cards", {"query": "t:angel f:commander"})
+
+        text = result.content[0].text
+        assert "57 match(es)" in text
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert sc["unreleased_total"] == 57
 
 
 class TestWhatsNewUnreleased:
@@ -627,6 +688,32 @@ class TestWhatsNewUnreleased:
 
         text = result.content[0].text
         assert "Darksteel Angel" in text
+        assert "Upcoming cards" in text
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert [c["name"] for c in sc["unreleased_included"]] == ["Darksteel Angel"]
+
+    @respx.mock
+    async def test_strict_mode_only_warns(self, client: Client):
+        """include_unreleased=false keeps the exclusion contract: named, not listed."""
+        main = _load_fixture("search_sultai_commander.json")
+        hidden = {
+            **main,
+            "data": [{**main["data"][0], "name": "Darksteel Angel"}],
+            "total_cards": 1,
+        }
+        respx.get(f"{BASE_URL}/cards/search").mock(
+            side_effect=self._route(
+                httpx.Response(200, json=main), httpx.Response(200, json=hidden)
+            )
+        )
+
+        result = await client.call_tool(
+            "whats_new", {"days": 30, "format": "commander", "include_unreleased": False}
+        )
+
+        text = result.content[0].text
+        assert "Darksteel Angel" in text
         assert "not_legal" in text
         sc = result.structured_content
         assert isinstance(sc, dict)
@@ -660,7 +747,7 @@ class TestWhatsNewUnreleased:
         assert isinstance(sc, dict)
         assert sc["total_cards"] == 0
         assert sc["cards"] == []
-        assert sc["unreleased_excluded"] == ["Darksteel Angel"]
+        assert [c["name"] for c in sc["unreleased_included"]] == ["Darksteel Angel"]
         assert "Darksteel Angel" in result.content[0].text
 
     @respx.mock
@@ -694,5 +781,5 @@ class TestWhatsNewUnreleased:
         sc = result.structured_content
         assert isinstance(sc, dict)
         # None, not []: no probe ran, so we make no claim about what is unreleased.
-        assert sc["unreleased_excluded"] is None
+        assert sc["unreleased_included"] is None
         assert route.call_count == 1

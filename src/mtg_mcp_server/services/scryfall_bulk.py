@@ -383,6 +383,7 @@ class ScryfallBulkClient:
         name_contains: str | None = None,
         limit: int = 100,
         unreleased: UnreleasedCollector | None = None,
+        include_unreleased: bool = False,
     ) -> list[Card]:
         """Multi-criteria filter over all cards. Returns up to ``limit`` matches.
 
@@ -404,9 +405,14 @@ class ScryfallBulkClient:
             name_contains: Substring match on card name (case-insensitive).
             limit: Maximum results to return.
             unreleased: When given alongside ``format``, receives every card that
-                matched all OTHER criteria but was excluded only because its set has
-                not been released yet. Collecting here rather than at each call site
-                keeps the probe's criteria identical to the search's by construction.
+                matched all OTHER criteria but failed only the legality check because
+                its set has not been released yet. Collecting here rather than at each
+                call site keeps the probe's criteria identical to the search's by
+                construction.
+            include_unreleased: When True (and ``unreleased`` is given), those cards
+                are ALSO kept in the results instead of being filtered out — the
+                owner's default for discovery tools. Without a collector this flag
+                has no effect: legality cannot be waived without knowing why it failed.
 
         Returns:
             Matching cards, up to ``limit``.
@@ -422,11 +428,10 @@ class ScryfallBulkClient:
 
         results: list[Card] = []
         for card in self._unique_cards:
-            if len(results) >= limit:
-                # Results are full; keep scanning only while unreleased hunting remains,
-                # otherwise later unreleased matches would be silently missed.
-                if unreleased is None or unreleased.full:
-                    break
+            # Results full: keep scanning only while unreleased hunting remains,
+            # otherwise later unreleased matches would be silently missed.
+            if len(results) >= limit and (unreleased is None or unreleased.full):
+                break
             legal = format is None or card.legalities.get(format) == "legal"
             if not legal:
                 # Only unreleased rejects are worth running the other criteria on.
@@ -474,7 +479,10 @@ class ScryfallBulkClient:
             if not legal:
                 if unreleased is not None:
                     unreleased.collect(card)
-                continue
+                # Included cards respect `limit` too; past it they are still collected
+                # (and therefore named in the note) but no longer listed.
+                if not include_unreleased or len(results) >= limit:
+                    continue
             results.append(card)
 
         return results
@@ -528,6 +536,7 @@ class ScryfallBulkClient:
         type_contains: str | None = None,
         rarity: str | None = None,
         unreleased: UnreleasedCollector | None = None,
+        include_unreleased: bool = False,
     ) -> Card | None:
         """Random card from a filtered pool. None if pool is empty.
 
@@ -537,8 +546,10 @@ class ScryfallBulkClient:
             type_contains: String that must appear in the type line (case-insensitive).
             rarity: Exact rarity match.
             unreleased: When given alongside ``format``, receives every card that
-                matched all OTHER criteria but was excluded only because its set has
-                not been released yet.
+                matched all OTHER criteria but failed only the legality check because
+                its set has not been released yet.
+            include_unreleased: When True (and ``unreleased`` is given), those cards
+                stay in the pool and can be drawn.
 
         Returns:
             A random matching card, or None if no cards match.
@@ -563,7 +574,8 @@ class ScryfallBulkClient:
             if not legal:
                 if unreleased is not None:
                     unreleased.collect(card)
-                continue
+                if not include_unreleased:
+                    continue
             pool.append(card)
 
         if not pool:

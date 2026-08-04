@@ -954,12 +954,40 @@ class TestTribalStaplesUnreleased:
         with patch("mtg_mcp_server.utils.unreleased.utc_today", return_value="2026-08-04"):
             result = await tribal_staples("Angel", bulk=mock_bulk, format="commander")
 
-        assert result.data["unreleased_excluded"] == ["Darksteel Angel"]
+        assert result.data["unreleased_included"] == ["Darksteel Angel"]
         assert "Darksteel Angel" in result.markdown
-        assert "not_legal" in result.markdown
-        # The filter itself stays respected: the card is not among the results.
-        for category in result.data["categories"]:
-            assert all(c["name"] != "Darksteel Angel" for c in category["cards"])
+        assert "[UNRELEASED" in result.markdown
+        # Owner default: the upcoming card IS among the results, marked.
+        listed = [c["name"] for category in result.data["categories"] for c in category["cards"]]
+        assert "Darksteel Angel" in listed
+
+    async def test_strict_mode_drops_and_names(self, mock_bulk: AsyncMock) -> None:
+        """include_unreleased=False restores the strict lists, names kept."""
+        serra = _mock_card(
+            "Serra Angel",
+            type_line="Creature — Angel",
+            color_identity=["W"],
+            edhrec_rank=100,
+        )
+        darksteel = _mock_card(
+            "Darksteel Angel",
+            type_line="Artifact Creature — Angel",
+            color_identity=["W"],
+            legalities={"commander": "not_legal"},
+        ).model_copy(update={"released_at": "2026-10-02"})
+
+        mock_bulk.search_by_text = AsyncMock(return_value=[])
+        mock_bulk.search_by_type = AsyncMock(return_value=[serra, darksteel])
+        mock_bulk.filter_cards = AsyncMock(return_value=[])
+
+        with patch("mtg_mcp_server.utils.unreleased.utc_today", return_value="2026-08-04"):
+            result = await tribal_staples(
+                "Angel", bulk=mock_bulk, format="commander", include_unreleased=False
+            )
+
+        assert result.data["unreleased_excluded"] == ["Darksteel Angel"]
+        listed = [c["name"] for category in result.data["categories"] for c in category["cards"]]
+        assert "Darksteel Angel" not in listed
 
     async def test_without_format_makes_no_claim(self, mock_bulk: AsyncMock) -> None:
         """No legality filter, nothing checked: None, never a misleading []."""
@@ -969,4 +997,4 @@ class TestTribalStaplesUnreleased:
 
         result = await tribal_staples("Angel", bulk=mock_bulk)
 
-        assert result.data["unreleased_excluded"] is None
+        assert result.data["unreleased_included"] is None

@@ -379,6 +379,7 @@ async def tribal_staples(
     color_identity: str | None = None,
     format: str | None = None,
     limit: int = 20,
+    include_unreleased: bool = True,
     response_format: Literal["detailed", "concise"] = "detailed",
 ) -> WorkflowResult:
     """Find the best cards for a creature type within a color identity.
@@ -450,6 +451,7 @@ async def tribal_staples(
         color_identity=identity,
         limit=limit,
         unreleased=collector,
+        include_unreleased=include_unreleased,
     )
 
     lords_result, synergy_result, members_result, support_result = await asyncio.gather(
@@ -464,9 +466,12 @@ async def tribal_staples(
                 continue
             if format is not None and card.legalities.get(format) != "legal":
                 # Legality is the LAST check here, so an unreleased reject already
-                # passed every other criterion: name it instead of dropping it.
-                collector.consider(card)
-                continue
+                # passed every other criterion: name it — and, by default, keep it.
+                if not collector.offer(card):
+                    continue
+                collector.collect(card)
+                if not include_unreleased:
+                    continue
             filtered.append(card)
         return filtered
 
@@ -516,8 +521,14 @@ async def tribal_staples(
 
     # Format output
     total_found = sum(len(cards) for _, cards in capped_categories)
-    lines = _format_tribal_staples(tribe, capped_categories, total_found, response_format)
-    note = collector.note(format or "")
+    lines = _format_tribal_staples(
+        tribe, capped_categories, total_found, response_format, marker=collector.marker
+    )
+    note = (
+        collector.note_included(format or "")
+        if include_unreleased
+        else collector.note(format or "")
+    )
     if note:
         lines.append("")
         lines.append(note)
@@ -528,7 +539,9 @@ async def tribal_staples(
         "color_identity": color_identity,
         "format": format,
         "total_found": total_found,
-        "unreleased_excluded": collector.field(),
+        ("unreleased_included" if include_unreleased else "unreleased_excluded"): (
+            collector.field()
+        ),
         "categories": [
             {
                 "name": cat_name,
@@ -553,8 +566,9 @@ def _format_tribal_staples(
     categories: list[tuple[str, list[Card]]],
     total: int,
     response_format: Literal["detailed", "concise"],
+    marker: Callable[[str], str] | None = None,
 ) -> list[str]:
-    """Format tribal staples output."""
+    """Format tribal staples output. ``marker`` suffixes unreleased card lines."""
     lines: list[str] = [f"# {tribe} Tribal Staples", ""]
 
     if total == 0:
@@ -570,10 +584,11 @@ def _format_tribal_staples(
         for card in cards:
             mana = card.mana_cost or ""
             rank_str = f" (EDHREC #{card.edhrec_rank})" if card.edhrec_rank is not None else ""
+            mark = marker(card.name) if marker is not None else ""
             if response_format == "concise":
-                lines.append(f"- {card.name} {mana}")
+                lines.append(f"- {card.name} {mana}{mark}")
             else:
-                lines.append(f"- **{card.name}** {mana} -- {card.type_line}{rank_str}")
+                lines.append(f"- **{card.name}** {mana} -- {card.type_line}{rank_str}{mark}")
         lines.append("")
 
     return lines

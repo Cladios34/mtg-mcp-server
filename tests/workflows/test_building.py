@@ -870,9 +870,12 @@ def _collecting_filter_cards(hidden: Card, results: list[Card] | None = None):
 
     async def side_effect(**kwargs):
         collector = kwargs.get("unreleased")
+        out = list(results or [])
         if collector is not None and kwargs.get("format") is not None:
             collector.collect(hidden)
-        return list(results or [])
+            if kwargs.get("include_unreleased"):
+                out.append(hidden)
+        return out
 
     return side_effect
 
@@ -903,9 +906,23 @@ class TestUnreleasedGuard:
 
         result = await theme_search("aristocrats", bulk=mock_bulk, format="commander")
 
-        assert result.data["unreleased_excluded"] == ["Darksteel Angel"]
-        assert "Darksteel Angel" in result.markdown
+        assert result.data["unreleased_included"] == ["Darksteel Angel"]
+        card_names = [c["name"] for c in result.data["cards"]]
+        assert "Darksteel Angel" in card_names
+        assert "[UNRELEASED" in result.markdown
         assert "not_legal" in result.markdown
+
+    async def test_theme_search_strict_mode_excludes(self, mock_bulk: AsyncMock) -> None:
+        """include_unreleased=False restores the strict list, names kept."""
+        mock_bulk.filter_cards = AsyncMock(side_effect=_collecting_filter_cards(self._hidden()))
+
+        result = await theme_search(
+            "aristocrats", bulk=mock_bulk, format="commander", include_unreleased=False
+        )
+
+        assert result.data["unreleased_excluded"] == ["Darksteel Angel"]
+        card_names = [c["name"] for c in result.data["cards"]]
+        assert "Darksteel Angel" not in card_names
 
     async def test_theme_search_without_format_makes_no_claim(self, mock_bulk: AsyncMock) -> None:
         """No legality filter, nothing checked: None, never a misleading []."""
@@ -913,7 +930,7 @@ class TestUnreleasedGuard:
 
         result = await theme_search("aristocrats", bulk=mock_bulk)
 
-        assert result.data["unreleased_excluded"] is None
+        assert result.data["unreleased_included"] is None
 
     async def test_build_around_reports_unreleased(
         self, mock_bulk: AsyncMock, mock_spellbook: AsyncMock
@@ -928,8 +945,10 @@ class TestUnreleasedGuard:
             ["Blood Artist"], "commander", bulk=mock_bulk, spellbook=mock_spellbook
         )
 
-        assert result.data["unreleased_excluded"] == ["Darksteel Angel"]
-        assert "Darksteel Angel" in result.markdown
+        assert result.data["unreleased_included"] == ["Darksteel Angel"]
+        synergy_names = [c["name"] for c in result.data["synergy_cards"]]
+        assert "Darksteel Angel" in synergy_names
+        assert "[UNRELEASED" in result.markdown
 
     async def test_complete_deck_reports_unreleased(self, mock_bulk: AsyncMock) -> None:
         creature = _mock_card(
@@ -940,5 +959,5 @@ class TestUnreleasedGuard:
 
         result = await complete_deck(["Llanowar Elves"], "commander", bulk=mock_bulk)
 
-        assert result.data["unreleased_excluded"] == ["Darksteel Angel"]
+        assert result.data["unreleased_included"] == ["Darksteel Angel"]
         assert "Darksteel Angel" in result.markdown

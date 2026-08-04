@@ -2,16 +2,15 @@
 
 Every tool the server exposes, organized by source. Tools prefixed with a namespace come from mounted backend servers. Unprefixed tools are workflow tools on the orchestrator.
 
-## Unreleased-card guard (`unreleased_excluded`)
+## Unreleased-card guard (`unreleased_included` / `unreleased_excluded`)
 
-Scryfall marks a card `not_legal` in every format until its set's release day, so any format-legality filter silently excludes fully spoiled cards from upcoming sets while the response still reads as exhaustive. Every **discovery** tool carrying a legality input — `scryfall_search_cards`, `scryfall_whats_new`, `bulk_format_search`, `bulk_similar_cards`, `bulk_random_card`, `theme_search`, `build_around`, `complete_deck`, `suggest_mana_base`, `tribal_staples` — therefore reports the cards its filter hid:
+Scryfall marks a card `not_legal` in every format until its set's release day, so any format-legality filter silently excludes fully spoiled cards from upcoming sets while the response still reads as exhaustive. Every **discovery** tool carrying a legality input — `scryfall_search_cards`, `scryfall_whats_new`, `bulk_format_search`, `bulk_similar_cards`, `bulk_random_card`, `theme_search`, `build_around`, `complete_deck`, `suggest_mana_base`, `tribal_staples` — therefore handles them explicitly, with an `include_unreleased` parameter:
 
-- The filter stays respected: excluded cards are named, never re-injected into the results.
-- Structured content carries `unreleased_excluded`: `null` when no legality filter was active (nothing was checked), a list — possibly empty — when one was. Only `[]` means "checked, found nothing".
-- The markdown output names the cards in a NOTE when any were hidden.
-- An empty result whose filter hid cards comes back as an annotated result, never a bare "not found" error — that error reads as "these cards do not exist" when the truth is the filter removed them.
+- **Default (`include_unreleased=true`, owner decision 2026-08-04):** upcoming cards that match every other criterion are INCLUDED in the results, marked `[UNRELEASED — releases YYYY-MM-DD]`, named in a NOTE, and listed in `unreleased_included`. On the Scryfall-API tools they appear in a dedicated "Upcoming cards" section (they come from a second query and cannot be interleaved with the remotely-sorted results). A limit or popularity sort never silently drops them.
+- **Strict (`include_unreleased=false`):** the filter is fully applied; the removed cards are NAMED in `unreleased_excluded` and in a warning note. An empty result whose filter hid cards comes back annotated, never as a bare "not found" error — that error reads as "these cards do not exist" when the truth is the filter removed them.
+- In either field: `null` when no legality filter was active (nothing was checked), a list — possibly empty — when one was. Only `[]` means "checked, found nothing".
 
-**Validation** tools (`bulk_format_legality`, `bulk_card_in_formats`, `deck_validate`, `bulk_ban_list`) deliberately keep answering `not_legal`: that is the information they exist to provide. `bulk_format_staples` is out of scope (it measures what is *played*). Shared implementation: `utils/unreleased.py` plus the `unreleased` collector parameter on `ScryfallBulkClient.filter_cards`/`random_card`.
+**Validation** tools (`bulk_format_legality`, `bulk_card_in_formats`, `deck_validate`, `bulk_ban_list`) deliberately keep answering `not_legal`: that is the information they exist to provide. `bulk_format_staples` is out of scope (it measures what is *played*). Shared implementation: `utils/unreleased.py` plus the `unreleased` collector and `include_unreleased` parameters on `ScryfallBulkClient.filter_cards`/`random_card`.
 
 ---
 

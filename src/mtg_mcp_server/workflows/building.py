@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Literal
 import structlog
 
 from mtg_mcp_server.utils.color_identity import parse_color_identity
-from mtg_mcp_server.utils.unreleased import UnreleasedCollector
+from mtg_mcp_server.utils.unreleased import UnreleasedCollector, merge_included
 from mtg_mcp_server.workflows import WorkflowResult
 
 if TYPE_CHECKING:
@@ -234,6 +234,7 @@ async def theme_search(
     format: str | None = None,
     max_price: float | None = None,
     limit: int = 20,
+    include_unreleased: bool = True,
     response_format: Literal["detailed", "concise"] = "detailed",
 ) -> WorkflowResult:
     """Find cards matching a theme -- mechanical, tribal, or abstract.
@@ -248,6 +249,8 @@ async def theme_search(
         format: Format legality filter (e.g. 'commander').
         max_price: Maximum USD price per card.
         limit: Maximum results.
+        include_unreleased: Keep cards from unreleased sets in the results,
+            marked (owner default). False restricts to currently-legal cards.
         response_format: Output verbosity.
 
     Returns:
@@ -294,6 +297,7 @@ async def theme_search(
             max_price=max_price,
             limit=limit,
             unreleased=collector,
+            include_unreleased=include_unreleased,
         )
     elif theme_lower in ABSTRACT_THEMES:
         # Abstract theme -- search name and text for synonyms
@@ -304,6 +308,7 @@ async def theme_search(
             max_price=max_price,
             limit=limit,
             unreleased=collector,
+            include_unreleased=include_unreleased,
         )
     else:
         # Assume tribal or unknown -- try type line first, then text search
@@ -314,6 +319,7 @@ async def theme_search(
             max_price=max_price,
             limit=limit,
             unreleased=collector,
+            include_unreleased=include_unreleased,
         )
 
         if not cards:
@@ -326,11 +332,20 @@ async def theme_search(
                 max_price=max_price,
                 limit=limit,
                 unreleased=collector,
+                include_unreleased=include_unreleased,
             )
 
-    # Build output
+    # Build output. In include mode, an upcoming card that limit or ordering pushed
+    # out of the filter result is merged back: silently losing it is the failure
+    # mode this guard exists for. `cards` is bounded (service limit + capped extras).
+    if include_unreleased:
+        cards = merge_included(cards, collector)
     total = len(cards)
-    note = collector.note(format or "")
+    note = (
+        collector.note_included(format or "")
+        if include_unreleased
+        else collector.note(format or "")
+    )
     lines: list[str] = []
 
     if response_format == "concise":
@@ -338,8 +353,8 @@ async def theme_search(
         if note:
             lines.append(note)
         lines.append("")
-        for card in cards[:limit]:
-            lines.append(_fmt_card_concise(card))
+        for card in cards:
+            lines.append(_fmt_card_concise(card) + collector.marker(card.name))
     else:
         lines.append(f"# Theme Search: {theme}")
         lines.append("")
@@ -358,22 +373,26 @@ async def theme_search(
         if not cards:
             lines.append("No cards found matching this theme.")
         else:
-            for card in cards[:limit]:
-                lines.append(_fmt_card_line(card))
+            for card in cards:
+                lines.append(_fmt_card_line(card) + collector.marker(card.name))
 
     log.info("theme_search.complete", theme=theme, found=total)
+    upcoming_names = set(collector.names)
     data: dict[str, object] = {
         "theme": theme_lower,
         "total_found": total,
-        "unreleased_excluded": collector.field(),
+        ("unreleased_included" if include_unreleased else "unreleased_excluded"): (
+            collector.field()
+        ),
         "cards": [
             {
                 "name": c.name,
                 "mana_cost": c.mana_cost,
                 "type_line": c.type_line,
                 "price_usd": c.prices.usd,
+                **({"unreleased": True} if c.name in upcoming_names else {}),
             }
-            for c in cards[:limit]
+            for c in cards
         ],
     }
     return WorkflowResult(markdown="\n".join(lines), data=data)
@@ -424,6 +443,7 @@ async def build_around(
     spellbook: SpellbookClient,
     budget: float | None = None,
     limit: int = 20,
+    include_unreleased: bool = True,
     response_format: Literal["detailed", "concise"] = "detailed",
 ) -> WorkflowResult:
     """Find synergistic cards for 1-5 build-around pieces.
@@ -477,10 +497,15 @@ async def build_around(
             max_price=budget,
             limit=limit,
             unreleased=collector,
+            include_unreleased=include_unreleased,
         )
 
     # Remove build-around cards from results
     ba_names = {c.name.lower() for c in resolved}
+    if include_unreleased:
+        # Upcoming cards that limit or ordering pushed out are merged back: silently
+        # losing them is the failure mode this guard exists for.
+        synergy_cards = merge_included(synergy_cards, collector)
     synergy_cards = [c for c in synergy_cards if c.name.lower() not in ba_names]
 
     # Step 4: Check Spellbook for combos
@@ -506,8 +531,8 @@ async def build_around(
         lines.append(f"**Synergies found:** {len(synergy_cards)}")
         lines.append(f"**Combos found:** {len(all_combos)}")
         lines.append("")
-        for card in synergy_cards[:limit]:
-            lines.append(_fmt_card_concise(card))
+        for card in synergy_cards:
+            lines.append(_fmt_card_concise(card) + collector.marker(card.name))
     else:
         lines.append(f"# Build Around: {', '.join(cards)}")
         lines.append(f"*Format: {format}*")
@@ -548,12 +573,12 @@ async def build_around(
         lines.append("## Synergistic Cards")
         lines.append("")
         if synergy_cards:
-            for card in synergy_cards[:limit]:
-                lines.append(_fmt_card_line(card))
+            for card in synergy_cards:
+                lines.append(_fmt_card_line(card) + collector.marker(card.name))
         else:
             lines.append("No additional synergistic cards found.")
 
-    note = collector.note(format)
+    note = collector.note_included(format) if include_unreleased else collector.note(format)
     if note:
         lines.append("")
         lines.append(note)
@@ -564,19 +589,23 @@ async def build_around(
         synergies=len(synergy_cards),
         combos=len(all_combos),
     )
+    upcoming_names = set(collector.names)
     data: dict[str, object] = {
         "build_around_cards": [c.name for c in resolved],
         "unresolved": unresolved,
         "format": format,
-        "unreleased_excluded": collector.field(),
+        ("unreleased_included" if include_unreleased else "unreleased_excluded"): (
+            collector.field()
+        ),
         "synergy_cards": [
             {
                 "name": c.name,
                 "mana_cost": c.mana_cost,
                 "type_line": c.type_line,
                 "price_usd": c.prices.usd,
+                **({"unreleased": True} if c.name in upcoming_names else {}),
             }
-            for c in synergy_cards[:limit]
+            for c in synergy_cards
         ],
         "combos_found": len(all_combos),
     }
@@ -711,6 +740,7 @@ async def complete_deck(
     bulk: ScryfallBulkClient,
     commander: str | None = None,
     budget: float | None = None,
+    include_unreleased: bool = True,
     on_progress: Callable[[int, int], Awaitable[None]] | None = None,
     response_format: Literal["detailed", "concise"] = "detailed",
 ) -> WorkflowResult:
@@ -814,6 +844,7 @@ async def complete_deck(
             max_price=budget,
             limit=cat_limit,
             unreleased=collector,
+            include_unreleased=include_unreleased,
         )
         # Exclude cards already in the deck
         existing_names = {c.name.lower() for c in resolved}
@@ -872,7 +903,7 @@ async def complete_deck(
                 label = cat.replace("_", " ").title()
                 lines.append(f"### {label}")
                 for card in cat_cards[:5]:
-                    lines.append(_fmt_card_line(card))
+                    lines.append(_fmt_card_line(card) + collector.marker(card.name))
                 lines.append("")
 
         if unresolved:
@@ -881,7 +912,7 @@ async def complete_deck(
             for name in unresolved:
                 lines.append(f"- {name}")
 
-    note = collector.note(format)
+    note = collector.note_included(format) if include_unreleased else collector.note(format)
     if note:
         lines.append("")
         lines.append(note)
@@ -902,7 +933,9 @@ async def complete_deck(
         "suggestions": {
             cat: [c.name for c in cards_list[:5]] for cat, cards_list in suggestions.items()
         },
-        "unreleased_excluded": collector.field(),
+        ("unreleased_included" if include_unreleased else "unreleased_excluded"): (
+            collector.field()
+        ),
         "unresolved": unresolved,
     }
     return WorkflowResult(markdown="\n".join(lines), data=data)

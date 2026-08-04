@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, date, datetime, timedelta
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import structlog
 from fastmcp import FastMCP
@@ -35,7 +35,15 @@ from mtg_mcp_server.utils.query_sanitize import (
 )
 from mtg_mcp_server.utils.slim import slim_card
 from mtg_mcp_server.utils.triggers import derive_trigger
-from mtg_mcp_server.utils.unreleased import FORMAT_FILTER_CAVEAT, unreleased_param_note
+from mtg_mcp_server.utils.unreleased import (
+    FORMAT_FILTER_CAVEAT,
+    UNRELEASED_CAP,
+    unreleased_param_note,
+    upcoming_section,
+)
+
+if TYPE_CHECKING:
+    from mtg_mcp_server.types import Card
 
 # Module-level client set by the lifespan. This pattern is required because
 # FastMCP's Depends()/lifespan_context DI doesn't propagate through mount().
@@ -90,6 +98,15 @@ async def search_cards(
         int,
         Field(description="Max cards to return (default 30, 0 for all)"),
     ] = 30,
+    include_unreleased: Annotated[
+        bool,
+        Field(
+            description="When the query carries a legality filter (f:, legal:...), also "
+            "list matching cards from sets not yet released in an Upcoming section "
+            "(default true). Scryfall marks those not_legal until release day. Set "
+            "false to only be warned about them (`unreleased_excluded`)."
+        ),
+    ] = True,
     response_format: Annotated[
         ResponseFormat,
         Field(description="Output verbosity: 'detailed' (default) or 'concise'"),
@@ -99,6 +116,7 @@ async def search_cards(
 
     Examples: "f:commander id:sultai t:creature", "o:destroy t:instant cmc<=3"
     See https://scryfall.com/docs/syntax for full syntax reference.
+    Legality-filtered queries also list matching unreleased cards by default.
     """
     if limit < 0:
         raise ToolError(f"limit must be >= 0 (0 for all), got {limit}")
@@ -108,10 +126,60 @@ async def search_cards(
     # tinguable from a valid query with no matches — so we decode it AND say so.
     sent_query, was_escaped = normalize_query(query)
 
+    # A legality filter hides everything from unreleased sets. Say WHICH cards, by name:
+    # the caller cannot act on a count, and a generic caveat stops being read.
+    # UTC, not local time: the server's timezone must not shift the release-date boundary
+    # by a day relative to the dates Scryfall publishes.
+    legality_filtered = has_legality_filter(sent_query)
+    upcoming: list[Card] | None = None
+    unreleased_total: int | None = None
+    probe = unreleased_probe_query(sent_query, datetime.now(UTC).date().isoformat())
+
     client = _get_client()
     try:
         result = await client.search_cards(sent_query, page=page)
     except CardNotFoundError as exc:
+        if legality_filtered and probe is not None:
+            upcoming, unreleased_total = await _probe_unreleased(client, probe)
+        if upcoming:
+            # Zero results whose legality filter hid existing cards must not surface
+            # as an error: "no cards found" reads as "these cards do not exist".
+            lines = [f"Found 0 cards for query: '{sent_query}'.", ""]
+            if include_unreleased:
+                lines.extend(upcoming_section(upcoming, unreleased_total, sent_query))
+            else:
+                lines.append(
+                    unreleased_warning(
+                        [c.name for c in upcoming], probe or "", total=unreleased_total
+                    )
+                )
+            return ToolResult(
+                content="\n".join(lines) + ATTRIBUTION_SCRYFALL,
+                structured_content={
+                    "query": sent_query,
+                    "query_sent": sent_query,
+                    "query_received": query,
+                    "query_was_escaped": was_escaped,
+                    "legality_filter_detected": legality_filtered,
+                    **(
+                        {
+                            "unreleased_included": [
+                                {**slim_card(c), "released_at": c.released_at}
+                                for c in upcoming[:UNRELEASED_CAP]
+                            ],
+                            "unreleased_total": unreleased_total,
+                        }
+                        if include_unreleased
+                        else {"unreleased_excluded": [c.name for c in upcoming]}
+                    ),
+                    "total_cards": 0,
+                    "page": page,
+                    "has_more": False,
+                    "showing": 0,
+                    "card_detail_uri_template": "mtg://card/{name}",
+                    "cards": [],
+                },
+            )
         raise ToolError(
             f"No cards found for query: '{sent_query}'. "
             f"This means zero matches, not necessarily bad syntax — "
@@ -125,24 +193,22 @@ async def search_cards(
     showing = len(cards)
     total = len(result.data)
 
-    # A legality filter hides everything from unreleased sets. Say WHICH cards, by name:
-    # the caller cannot act on a count, and a generic caveat stops being read.
-    # UTC, not local time: the server's timezone must not shift the release-date boundary
-    # by a day relative to the dates Scryfall publishes.
-    legality_filtered = has_legality_filter(sent_query)
-    unreleased: list[str] | None = None
-    unreleased_total: int | None = None
-    probe = unreleased_probe_query(sent_query, datetime.now(UTC).date().isoformat())
     if legality_filtered and probe is not None:
-        unreleased, unreleased_total = await _probe_unreleased(client, probe)
+        upcoming, unreleased_total = await _probe_unreleased(client, probe)
+    upcoming_names = [c.name for c in upcoming] if upcoming is not None else None
 
     lines = [f"Found {result.total_cards} cards (showing {showing} of {total}, page {page}):"]
-    if unreleased:
-        lines.insert(0, unreleased_warning(unreleased, probe or "", total=unreleased_total))
+    if upcoming and not include_unreleased:
+        lines.insert(
+            0, unreleased_warning(upcoming_names or [], probe or "", total=unreleased_total)
+        )
     if was_escaped:
         lines.insert(0, escaping_warning(query, sent_query))
     for card in cards:
         lines.append(format_card_line(card, response_format=response_format))
+    if upcoming and include_unreleased:
+        lines.append("")
+        lines.extend(upcoming_section(upcoming, unreleased_total, sent_query))
     if showing < total:
         lines.append(f"\n{total - showing} more on this page — increase limit to see them.")
     if result.has_more:
@@ -158,14 +224,29 @@ async def search_cards(
             "query_sent": sent_query,
             "query_received": query,
             "query_was_escaped": was_escaped,
-            # `unreleased_excluded` is None when no probe ran, and a list (possibly empty)
-            # when one did. None and [] are NOT the same claim: only [] means "checked,
-            # found nothing". No probe runs when there is no legality filter, but ALSO
-            # when the filter was the whole query or what remained was unbalanced, so
-            # `legality_filter_detected: true` with `unreleased_excluded: null` is a real
-            # and meaningful combination: a filter was seen, nothing could be checked.
+            # The active-mode field is None when no probe ran, and a list (possibly
+            # empty) when one did. None and [] are NOT the same claim: only [] means
+            # "checked, found nothing". No probe runs when there is no legality filter,
+            # but ALSO when the filter was the whole query or what remained was
+            # unbalanced, so `legality_filter_detected: true` with a null field is a
+            # real and meaningful combination: a filter was seen, nothing could be
+            # checked. By default (include_unreleased) upcoming cards are LISTED in
+            # `unreleased_included`; the strict mode reverts to naming them in
+            # `unreleased_excluded` only.
             "legality_filter_detected": legality_filtered,
-            "unreleased_excluded": unreleased,
+            **(
+                {
+                    "unreleased_included": None
+                    if upcoming is None
+                    else [
+                        {**slim_card(c), "released_at": c.released_at}
+                        for c in upcoming[:UNRELEASED_CAP]
+                    ],
+                    "unreleased_total": unreleased_total,
+                }
+                if include_unreleased
+                else {"unreleased_excluded": upcoming_names}
+            ),
             "total_cards": result.total_cards,
             "page": page,
             "has_more": result.has_more,
@@ -176,8 +257,8 @@ async def search_cards(
     )
 
 
-async def _probe_unreleased(client: ScryfallClient, probe: str) -> tuple[list[str], int | None]:
-    """Names (first page) and Scryfall's total for `probe`, or ([], None) on any failure.
+async def _probe_unreleased(client: ScryfallClient, probe: str) -> tuple[list[Card], int | None]:
+    """Cards (first page) and Scryfall's total for `probe`, or ([], None) on any failure.
 
     Best-effort by design: this is a warning path, so a probe that fails must never
     take down a search that succeeded.
@@ -193,7 +274,7 @@ async def _probe_unreleased(client: ScryfallClient, probe: str) -> tuple[list[st
     by ~90s and blow the caller's own timeout. A warning is never worth losing the answer,
     hence `_PROBE_TIMEOUT_S`.
 
-    The name list is one page; `total_cards` is the real match count. Both are returned so
+    The card list is one page; `total_cards` is the real match count. Both are returned so
     the message can report the count it actually measured instead of the page size.
     """
     try:
@@ -206,7 +287,7 @@ async def _probe_unreleased(client: ScryfallClient, probe: str) -> tuple[list[st
     except Exception as exc:
         log.warning("unreleased_probe_failed", probe=probe, error=str(exc))
         return [], None
-    return [card.name for card in found.data], found.total_cards
+    return found.data, found.total_cards
 
 
 @scryfall_mcp.tool(annotations=TOOL_ANNOTATIONS, tags=TAGS_LOOKUP)
@@ -381,6 +462,14 @@ async def whats_new(
         int,
         Field(description="Max cards to return (default 30, 0 for all)"),
     ] = 30,
+    include_unreleased: Annotated[
+        bool,
+        Field(
+            description="With a format filter, also list matching cards from sets not "
+            "yet released in an Upcoming section (default true). Set false to only be "
+            "warned about them (`unreleased_excluded`)."
+        ),
+    ] = True,
     response_format: Annotated[
         ResponseFormat,
         Field(description="Output verbosity: 'detailed' (default) or 'concise'"),
@@ -389,7 +478,8 @@ async def whats_new(
     """Find recently printed or released Magic cards.
 
     Searches Scryfall for cards released within the given number of days.
-    Optionally filter by set or format legality.
+    Optionally filter by set or format legality; with a format filter, cards
+    from unreleased sets are still listed by default in an Upcoming section.
     """
     if days < 1:
         raise ToolError("days must be at least 1.")
@@ -413,23 +503,45 @@ async def whats_new(
         today = datetime.now(UTC).date().isoformat()
         probe = unreleased_probe_query(query, today) or bare_unreleased_query(today)
 
+    def _unreleased_fields(upcoming: list[Card] | None, total: int | None) -> dict[str, object]:
+        """Mode-dependent structured fields, same None/[] contract as search_cards."""
+        if include_unreleased:
+            return {
+                "unreleased_included": None
+                if upcoming is None
+                else [
+                    {**slim_card(c), "released_at": c.released_at}
+                    for c in upcoming[:UNRELEASED_CAP]
+                ],
+                "unreleased_total": total,
+            }
+        return {"unreleased_excluded": None if upcoming is None else [c.name for c in upcoming]}
+
     client = _get_client()
-    unreleased: list[str] | None = None
+    upcoming: list[Card] | None = None
     unreleased_total: int | None = None
     try:
         result = await client.search_cards(query)
     except CardNotFoundError as exc:
         if probe is not None:
-            unreleased, unreleased_total = await _probe_unreleased(client, probe)
-        if unreleased:
+            upcoming, unreleased_total = await _probe_unreleased(client, probe)
+        if upcoming:
             # The most dangerous case: a bare "no cards found" error reads as "these
             # cards do not exist", when the truth is the format filter removed them.
-            warning = unreleased_param_note(unreleased, format or "", total=unreleased_total)
+            if include_unreleased:
+                extra = "\n".join(upcoming_section(upcoming, unreleased_total, format or ""))
+            else:
+                extra = (
+                    unreleased_param_note(
+                        [c.name for c in upcoming], format or "", total=unreleased_total
+                    )
+                    or ""
+                )
             return ToolResult(
                 content=(
                     f"Found 0 card(s) released in the last {days} day(s)"
                     + (f" for set '{set_code}'" if set_code else "")
-                    + f" legal in '{format}'.\n\n{warning}"
+                    + f" legal in '{format}'.\n\n{extra}"
                     + ATTRIBUTION_SCRYFALL
                 ),
                 structured_content={
@@ -439,7 +551,7 @@ async def whats_new(
                     "total_cards": 0,
                     "showing": 0,
                     "has_more": False,
-                    "unreleased_excluded": unreleased,
+                    **_unreleased_fields(upcoming, unreleased_total),
                     "cards": [],
                 },
             )
@@ -453,16 +565,19 @@ async def whats_new(
         raise ToolError(f"Scryfall API error: {exc}") from exc
 
     if probe is not None:
-        unreleased, unreleased_total = await _probe_unreleased(client, probe)
+        upcoming, unreleased_total = await _probe_unreleased(client, probe)
 
     cards = result.data if limit == 0 else result.data[:limit]
     showing = len(cards)
     total = len(result.data)
 
     lines = [f"Found {result.total_cards} card(s) released in the last {days} day(s):"]
-    warning = unreleased_param_note(unreleased or [], format or "", total=unreleased_total)
-    if warning:
-        lines.insert(0, warning)
+    if upcoming and not include_unreleased:
+        warning = unreleased_param_note(
+            [c.name for c in upcoming], format or "", total=unreleased_total
+        )
+        if warning:
+            lines.insert(0, warning)
     for card in cards:
         if response_format == "concise":
             set_label = card.set_code.upper() if card.set_code else ""
@@ -470,6 +585,9 @@ async def whats_new(
         else:
             set_label = card.set_code.upper() if card.set_code else ""
             lines.append(f"  {card.name} {card.mana_cost or ''} — {card.type_line} [{set_label}]")
+    if upcoming and include_unreleased:
+        lines.append("")
+        lines.extend(upcoming_section(upcoming, unreleased_total, format or ""))
     if showing < total:
         lines.append(f"\n{total - showing} more on this page — increase limit to see them.")
     if result.has_more:
@@ -487,7 +605,7 @@ async def whats_new(
             "has_more": result.has_more,
             # Same contract as scryfall_search_cards: None when no probe ran (no
             # format filter), a list — possibly empty — when one did.
-            "unreleased_excluded": unreleased,
+            **_unreleased_fields(upcoming, unreleased_total),
             "cards": [slim_card(card) for card in cards],
         },
     )

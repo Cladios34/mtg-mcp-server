@@ -972,6 +972,46 @@ class TestUnreleasedCollection:
         )
         assert "Darksteel Angel" in collector.names
 
+    async def test_filter_cards_include_mode_keeps_unreleased_in_results(
+        self, loaded_client: ScryfallBulkClient
+    ):
+        """Owner default (wired by the tools): the upcoming card IS a result,
+        and still collected so callers can mark it."""
+        collector = UnreleasedCollector(active=True, today=self._TODAY)
+        results = await loaded_client.filter_cards(
+            format="commander",
+            type_contains=["Angel"],
+            unreleased=collector,
+            include_unreleased=True,
+        )
+        assert any(c.name == "Darksteel Angel" for c in results)
+        assert "Darksteel Angel" in collector.names
+
+    async def test_random_card_include_mode_pool_contains_unreleased(
+        self, loaded_client: ScryfallBulkClient
+    ):
+        """With a pool narrowed to the upcoming card, include mode can draw it."""
+        collector = UnreleasedCollector(active=True, today=self._TODAY)
+        card = await loaded_client.random_card(
+            format="commander",
+            type_contains="Artifact Creature",  # Darksteel Angel's type line
+            unreleased=collector,
+            include_unreleased=True,
+        )
+        assert "Darksteel Angel" in collector.names
+        assert card is not None
+
+    async def test_include_mode_without_collector_changes_nothing(
+        self, loaded_client: ScryfallBulkClient
+    ):
+        """Without a collector, legality cannot be waived: the flag is inert."""
+        results = await loaded_client.filter_cards(
+            format="commander",
+            type_contains=["Angel"],
+            include_unreleased=True,
+        )
+        assert all(c.name != "Darksteel Angel" for c in results)
+
 
 class TestETagEdgeCases:
     """Test ETag edge cases."""
