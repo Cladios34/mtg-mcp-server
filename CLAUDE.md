@@ -79,8 +79,8 @@ See @docs/ARCHITECTURE.md for full details.
 
 ## Git Workflow
 
-- Always work on a feature branch (`feat/description`). Never commit directly to main.
-- Commit atomically after each logical unit of work — don't batch changes into one big commit.
+- Solo-dev repo: commit directly to `main`. No PRs — GitHub PR review has no reviewer here, and CI (`check` + `live-tests` + `build` + `security`) already runs on every push to `main`. Only use a feature branch for genuinely parallel work (multi-agent worktrees, see below) and merge it straight to `main` when done, still without a PR.
+- Commit atomically after each logical unit of work — don't batch changes into one big commit. Never bundle files from unrelated in-progress work (yours from an earlier point in the session, or another concurrent session's) into a commit — stage by explicit path, never `git add -A`/`.`, and check `git diff --cached --name-only` matches what you actually touched before committing.
 - Before launching worktree agents: commit all changes, verify `git status` is clean AND verify `git branch` shows you're on the correct feature branch. Agents branch from the last COMMITTED state of the CURRENT branch — if you're on the wrong branch or agents somehow branch from main, they'll miss all feature branch work. After launching, verify agent worktrees are based on the right commit.
 - Never blindly `cp` a file from a worktree over a file with scaffold changes. Always diff first (`diff <worktree-file> <main-file>`) or selectively merge. Worktree agents rewrite entire files — a copy will silently destroy scaffold additions.
 - Cherry-pick agent commits back to the feature branch. Discard agent rewrites of shared files (use scaffold versions).
@@ -98,6 +98,8 @@ Use the most parallel approach that fits the task. Prefer this hierarchy:
 When a plan has an agent table with exclusive files, use parallel agents. When tasks must be sequential but benefit from review gates, use subagent-driven development. Always commit before launching worktree agents.
 
 ## PR Workflow
+
+Manual work commits straight to `main` (see Git Workflow above) — this section applies only to automated PRs (e.g. Dependabot) that show up on the repo.
 
 - Always create PRs as drafts (`gh pr create --draft`). Claude review triggers on `ready_for_review`, not `opened`.
 
