@@ -115,6 +115,8 @@ async def hand_probability(
             Defaults to the largest possible count (``min(cards_seen, copies)``).
         decklist: The actual list, so the category can be counted instead of stated.
         category_filter: A small filter expression, e.g. ``"mv<=1 t:creature"``.
+            Juxtaposed terms are ANDed; ``or`` unions clauses and binds looser
+            than juxtaposition (``t:a or t:b mv<=3`` = t:a OR (t:b AND mv<=3)).
         bulk: Bulk data client, used to resolve ``decklist``.
         scryfall: Scryfall client, used for whatever bulk data misses.
 
