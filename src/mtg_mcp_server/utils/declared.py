@@ -37,7 +37,11 @@ _TERM_RE = re.compile(
 
 @dataclass(frozen=True)
 class CategoryFilter:
-    """A parsed category filter. Empty fields mean "no constraint on this axis"."""
+    """A parsed category filter. Empty fields mean "no constraint on this axis".
+
+    When ``clauses`` is non-empty, this filter is a UNION (``or``) of those clauses
+    and its own axis fields are unused: a card matches if any clause matches.
+    """
 
     mv_lte: float | None = None
     mv_gte: float | None = None
@@ -47,8 +51,15 @@ class CategoryFilter:
     names: tuple[str, ...] = ()
     keywords: tuple[str, ...] = ()
     unparsed: tuple[str, ...] = ()
+    clauses: tuple[CategoryFilter, ...] = ()
 
     def matches(self, card: Card) -> bool:
+        # GOTCHA(2026-07-30): before clause support, "t:angel or t:demon" was read as
+        # one conjunctive clause, the "or" tokens fell into `unparsed`, and the count
+        # came back 0 — false but plausible. `or` is now a real union.
+        if self.clauses:
+            return any(clause.matches(card) for clause in self.clauses)
+
         cmc = card.cmc
         if self.mv_eq is not None and cmc != self.mv_eq:
             return False
@@ -109,13 +120,80 @@ def _strip(value: str) -> str:
     return value.strip('"').lower()
 
 
+def _split_or_clauses(expression: str) -> list[str]:
+    """Split an expression on standalone ``or`` tokens, outside double quotes.
+
+    ``or`` inside a quoted value (``o:"destroy or exile"``) is text, never an
+    operator. Returns the clause strings, possibly empty ones when an ``or``
+    dangles — the caller decides how loudly to report those.
+    """
+    tokens: list[str] = []
+    buffer = ""
+    in_quote = False
+    for char in expression:
+        if char == '"':
+            in_quote = not in_quote
+            buffer += char
+        elif char.isspace() and not in_quote:
+            if buffer:
+                tokens.append(buffer)
+                buffer = ""
+        else:
+            buffer += char
+    if buffer:
+        tokens.append(buffer)
+
+    clauses: list[str] = []
+    current: list[str] = []
+    for token in tokens:
+        if token.lower() == "or":
+            clauses.append(" ".join(current))
+            current = []
+        else:
+            current.append(token)
+    clauses.append(" ".join(current))
+    return clauses
+
+
 def parse_filter(expression: str) -> CategoryFilter:
     """Parse a small filter expression such as ``mv<=1 t:creature``.
 
+    Juxtaposed terms are an implicit AND; ``or`` unions whole clauses and binds
+    LOOSER than juxtaposition: ``t:a or t:b mv<=3`` means t:a OR (t:b AND mv<=3),
+    exactly like Scryfall. An ``or`` inside a quoted value stays text.
+
     Terms it does not understand are collected in ``unparsed`` rather than dropped:
     a filter that silently ignores half its input produces a count that looks
-    authoritative and is not.
+    authoritative and is not. A dangling ``or`` (no clause on one side) is reported
+    in ``unparsed`` too, never treated as matching everything.
     """
+    parts = _split_or_clauses(expression)
+    if len(parts) > 1:
+        clauses = tuple(_parse_clause(part) for part in parts if part.strip())
+        unparsed = tuple(term for clause in clauses for term in clause.unparsed)
+        # An empty side of an `or` must stay visible: silently dropping it is the
+        # same family of failure as swallowing the operator itself.
+        if any(not part.strip() for part in parts):
+            unparsed = (*unparsed, "or")
+        if not clauses:
+            return CategoryFilter(unparsed=unparsed)
+        if len(clauses) == 1:
+            return CategoryFilter(
+                mv_lte=clauses[0].mv_lte,
+                mv_gte=clauses[0].mv_gte,
+                mv_eq=clauses[0].mv_eq,
+                types=clauses[0].types,
+                text=clauses[0].text,
+                names=clauses[0].names,
+                keywords=clauses[0].keywords,
+                unparsed=unparsed,
+            )
+        return CategoryFilter(unparsed=unparsed, clauses=clauses)
+    return _parse_clause(expression)
+
+
+def _parse_clause(expression: str) -> CategoryFilter:
+    """Parse one conjunctive clause (implicit AND between juxtaposed terms)."""
     mv_lte = mv_gte = mv_eq = None
     types: list[str] = []
     text: list[str] = []

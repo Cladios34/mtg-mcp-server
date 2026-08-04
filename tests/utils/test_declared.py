@@ -7,6 +7,8 @@ one fell from 63.91% to 57.36%.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from mtg_mcp_server.types import Card
 from mtg_mcp_server.utils.declared import evaluate_categories, parse_filter
 
@@ -49,6 +51,57 @@ class TestFilterParsing:
         # A filter that silently ignores half its input produces a count that looks
         # authoritative and is not.
         assert parse_filter("mv<=1 something_weird").unparsed == ("something_weird",)
+
+
+class TestOrOperator:
+    """Regression origin (2026-07-30) : ``t:angel or t:demon or t:dragon`` sur un deck
+    qui contenait 16 de ces créatures a rendu actual=0, les jetons ``or`` avalés dans
+    unparsed_terms : un compte faux mais plausible. La règle attendue : ``or`` fait
+    l'UNION des clauses, le ET implicite reste entre termes juxtaposés, et ``or``
+    lie moins fort que la juxtaposition (``t:a or t:b mv<=3`` = t:a OU (t:b ET mv<=3)).
+    """
+
+    TRIBES: ClassVar[list[Card]] = [
+        _card("Serra Angel", type_line="Creature — Angel", cmc=5.0),
+        _card("Razaketh", type_line="Creature — Demon", cmc=8.0),
+        _card("Shivan Dragon", type_line="Creature — Dragon", cmc=6.0),
+        _card("Sol Ring", type_line="Artifact", cmc=1.0),
+    ]
+
+    def test_or_makes_a_union_and_leaves_nothing_unparsed(self) -> None:
+        parsed = parse_filter("t:angel or t:demon or t:dragon")
+        assert parsed.unparsed == ()
+        matched = [c.name for c in self.TRIBES if parsed.matches(c)]
+        assert matched == ["Serra Angel", "Razaketh", "Shivan Dragon"]
+
+    def test_or_binds_looser_than_juxtaposition(self) -> None:
+        # t:angel or t:dragon mv<=3  ==  t:angel OU (t:dragon ET mv<=3)
+        parsed = parse_filter("t:angel or t:dragon mv<=3")
+        assert parsed.unparsed == ()
+        assert parsed.matches(_card("Serra Angel", type_line="Creature — Angel", cmc=5.0))
+        assert not parsed.matches(_card("Shivan Dragon", type_line="Creature — Dragon", cmc=6.0))
+        assert parsed.matches(_card("Dragon Hatchling", type_line="Creature — Dragon", cmc=2.0))
+
+    def test_quoted_or_is_text_not_operator(self) -> None:
+        parsed = parse_filter('o:"destroy or exile"')
+        assert parsed.text == ("destroy or exile",)
+        assert parsed.unparsed == ()
+
+    def test_dangling_or_is_reported_not_swallowed(self) -> None:
+        # Un « or » sans clause de chaque côté ne doit jamais disparaître en silence.
+        assert "or" in parse_filter("t:angel or").unparsed
+        assert "or" in parse_filter("or t:angel").unparsed
+
+    def test_union_count_through_evaluate_categories(self) -> None:
+        # La forme exacte de l'incident : 3 types déclarés, compte attendu exact.
+        result = evaluate_categories(
+            [{"name": "tribes", "filter": "t:angel or t:demon or t:dragon", "expected": 3}],
+            self.TRIBES,
+        )[0]
+        assert result.actual == 3
+        assert result.drift == 0
+        assert result.drifted is False
+        assert result.to_dict()["unparsed_terms"] == []
 
 
 class TestDriftDetection:

@@ -771,6 +771,43 @@ class TestDeckSizeMatchesTheList:
         assert result.data["declared_deck_size"] == 99
         assert "Deck size corrected to 60" in result.markdown
 
+    async def test_or_filter_counts_the_union(self):
+        """Repro 2026-07-30 : 't:angel or t:demon or t:dragon' rendait actual=0
+        (drift -16) avec les jetons 'or' avalés dans unparsed_terms, sur un deck
+        qui contenait bien 16 créatures Ange/Démon/Dragon."""
+        from mtg_mcp_server.workflows.simulation import hand_probability
+
+        cards: dict[str, Card] = {}
+        deck: list[str] = []
+        tribes = ["Angel"] * 5 + ["Demon"] * 6 + ["Dragon"] * 5
+        for i, tribe in enumerate(tribes):
+            name = f"{tribe} {i}"
+            cards[name.lower()] = _make_card(name).model_copy(
+                update={"type_line": f"Creature — {tribe}"}
+            )
+            deck.append(name)
+        for i in range(83):
+            name = f"Filler {i}"
+            cards[name.lower()] = _make_card(name).model_copy(update={"type_line": "Artifact"})
+            deck.append(name)
+
+        result = await hand_probability(
+            copies=16,
+            cards_seen=10,
+            min_count=1,
+            decklist=deck,
+            category_filter="t:angel or t:demon or t:dragon",
+            bulk=_make_bulk(cards),
+            scryfall=_make_scryfall({}),
+        )
+        category = result.data["category"]
+        assert category["actual"] == 16
+        assert category["drift"] == 0
+        assert category["drifted"] is False
+        assert category["unparsed_terms"] == []
+        assert result.data["copies"] == 16
+        assert result.data["probability"] > 0.8
+
     async def test_explicit_deck_size_matching_the_list_is_not_flagged(self):
         from mtg_mcp_server.workflows.simulation import hand_probability
 
