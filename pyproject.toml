@@ -59,7 +59,7 @@ Changelog = "https://github.com/j4th/mtg-mcp-server/blob/main/CHANGELOG.md"
 mtg-mcp-server = "mtg_mcp_server.server:main"
 
 [build-system]
-requires = ["uv_build>=0.10.9,<0.12.0"]
+requires = ["uv_build>=0.10.9,<0.13.0"]
 build-backend = "uv_build"
 
 # ---------------------------------------------------------------------------
