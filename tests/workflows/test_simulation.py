@@ -20,6 +20,7 @@ from mtg_mcp_server.workflows.simulation import (
     _run_simulation,
     _Slot,
     _source_colors,
+    _tutor_matches,
     _tutor_targets,
     hand_probability,
     simulate_opening_hands,
@@ -812,10 +813,10 @@ _LAND_TAX = _make_card(
         "for up to three basic land cards, reveal them, put them into your hand, then shuffle."
     ),
 )
-# GOTCHA(2026-08-06) : les tuteurs d'équipement ("search your library for an Equipment
-# card") tombaient dans le fallback "any" (84 cibles au lieu des seuls équipements) car
-# "equipment" ne contient ni "artifact" ni "enchantment". Textes oracle vérifiés via
-# Scryfall le 06-08-2026.
+# GOTCHA(2026-08-06): Equipment tutors ("search your library for an Equipment card")
+# fell into the "any" fallback (84 targets instead of Equipment only) because
+# "equipment" contains neither "artifact" nor "enchantment". Oracle texts verified
+# against Scryfall on 2026-08-06.
 _CLOUD_MIDGAR = _make_card(
     "Cloud, Midgar Mercenary",
     type_line="Legendary Creature - Human Soldier Mercenary",
@@ -839,6 +840,57 @@ _STONEFORGE_MYSTIC = _make_card(
         "{1}{W}, {T}: You may put an Equipment card from your hand onto the battlefield."
     ),
 )
+# GOTCHA(2026-08-07): the first-match cascade kept only ONE keyword per tutor.
+# "an Aura or Equipment card" (Open the Armory) classified as "equipment", silently
+# excluding every Aura from the computed targets; "an Aura card" alone (Heliod's
+# Pilgrim) or "a planeswalker card" (Call the Gatewatch) matched nothing and fell
+# into the "any" fallback -- the same bug fixed on 2026-08-06 for Equipment, on
+# neighboring keywords. Oracle texts verified against Scryfall on 2026-08-07.
+_OPEN_THE_ARMORY = _make_card(
+    "Open the Armory",
+    type_line="Sorcery",
+    mana_cost="{1}{W}",
+    cmc=2.0,
+    oracle_text=(
+        "Search your library for an Aura or Equipment card, reveal it, put it into "
+        "your hand, then shuffle."
+    ),
+)
+_HELIODS_PILGRIM = _make_card(
+    "Heliod's Pilgrim",
+    type_line="Creature - Human Cleric",
+    mana_cost="{2}{W}",
+    cmc=3.0,
+    oracle_text=(
+        "When this creature enters, you may search your library for an Aura card, "
+        "reveal it, put it into your hand, then shuffle."
+    ),
+)
+_CALL_THE_GATEWATCH = _make_card(
+    "Call the Gatewatch",
+    type_line="Sorcery",
+    mana_cost="{2}{W}",
+    cmc=3.0,
+    oracle_text=(
+        "Search your library for a planeswalker card, reveal it, put it into your "
+        "hand, then shuffle."
+    ),
+)
+# Real card whose search clause names an Aura while the SAME SENTENCE also says
+# "that creature": classification must read the clause's card types, not every
+# word around them.
+_SOVEREIGNS_OF_LOST_ALARA = _make_card(
+    "Sovereigns of Lost Alara",
+    type_line="Creature - Spirit",
+    mana_cost="{4}{W}{U}",
+    cmc=6.0,
+    oracle_text=(
+        "Exalted\n"
+        "Whenever a creature you control attacks alone, you may search your library "
+        "for an Aura card that could enchant that creature, put it onto the "
+        "battlefield attached to that creature, then shuffle."
+    ),
+)
 
 
 class TestClassifyTutor:
@@ -855,15 +907,41 @@ class TestClassifyTutor:
             (_GREEN_SUNS_ZENITH, ("color_creature", "battlefield", "sorcery")),
             (_CHORD_OF_CALLING, ("creature", "battlefield", "instant")),
             (_LAND_TAX, ("basic_land", "hand", "sorcery")),
-            # Destination "battlefield" pour Stoneforge : sa 2e capacité contient
-            # "onto the battlefield", et le parseur de destination est premier-match.
+            # Destination "battlefield" for Stoneforge: its second ability contains
+            # "onto the battlefield", and the destination parser is first-match.
             (_CLOUD_MIDGAR, ("equipment", "hand", "sorcery")),
             (_STONEFORGE_MYSTIC, ("equipment", "battlefield", "sorcery")),
+            (_OPEN_THE_ARMORY, ("aura_equipment", "hand", "sorcery")),
+            (_HELIODS_PILGRIM, ("aura", "hand", "sorcery")),
+            (_CALL_THE_GATEWATCH, ("planeswalker", "hand", "sorcery")),
+            (_SOVEREIGNS_OF_LOST_ALARA, ("aura", "battlefield", "sorcery")),
         ],
     )
     def test_classify_known_tutors(self, card: Card, expected: tuple[str, str, str]):
         cls = _classify_card(card, extra_mana_sources=frozenset(), exclude_cards=frozenset())
         assert _classify_tutor(card, cls) == expected
+
+    def test_type_words_outside_the_search_clause_are_ignored(self):
+        """A type word in ANOTHER ability must not pollute the classification.
+
+        Synthetic fixture: the search clause is unconstrained ("for a card"),
+        while a second ability mentions both "creature card" and "artifact".
+        The whole-oracle cascade used to classify this as "creature".
+        """
+        card = _make_card(
+            "Test Recruiter",
+            type_line="Creature - Human Soldier",
+            mana_cost="{2}{B}",
+            cmc=3.0,
+            oracle_text=(
+                "When this creature enters, search your library for a card, put it "
+                "into your hand, then shuffle.\n"
+                "Sacrifice an artifact: Return target creature card from your "
+                "graveyard to your hand."
+            ),
+        )
+        cls = _classify_card(card, extra_mana_sources=frozenset(), exclude_cards=frozenset())
+        assert _classify_tutor(card, cls) == ("any", "hand", "sorcery")
 
     def test_fetchland_and_ramp_spell_are_not_tutors(self):
         arid_mesa = _make_card(
@@ -909,6 +987,42 @@ class TestTutorTargetsAndAggregation:
         names, count = _tutor_targets("equipment", deck_cards)
         assert count == 1
         assert names == ["Lightning Greaves"]
+
+    def test_compound_constraint_targets_every_enumerated_type(self):
+        """ "aura_equipment" (Open the Armory) hits Auras AND Equipment, nothing else."""
+        deck_cards = [
+            _make_card("Lightning Greaves", type_line="Artifact - Equipment", mana_cost="{2}"),
+            _make_card("Rancor", type_line="Enchantment - Aura", mana_cost="{G}"),
+            _make_card("Sol Ring", type_line="Artifact", mana_cost="{1}"),
+            _make_card("Rhystic Study", type_line="Enchantment", mana_cost="{2}{U}"),
+            _make_card("Grizzly Bears", type_line="Creature - Bear"),
+        ]
+        names, count = _tutor_targets("aura_equipment", deck_cards)
+        assert count == 2
+        assert set(names) == {"Lightning Greaves", "Rancor"}
+
+    def test_aura_constraint_requires_the_aura_subtype(self):
+        assert _tutor_matches(
+            "aura", _make_card("Rancor", type_line="Enchantment - Aura", mana_cost="{G}")
+        )
+        # A plain enchantment is NOT a legal target for an "Aura card" tutor.
+        assert not _tutor_matches(
+            "aura", _make_card("Rhystic Study", type_line="Enchantment", mana_cost="{2}{U}")
+        )
+        # Word-boundary guard: "Aura" must not match a "Creature - Aurochs" type line.
+        assert not _tutor_matches(
+            "aura", _make_card("Aurochs Herd", type_line="Creature - Aurochs")
+        )
+
+    def test_target_count_is_quantity_weighted(self):
+        """14 Plains are 14 basic-land targets, not 1 (names stay unique)."""
+        deck_cards = [
+            _make_card("Plains", type_line="Basic Land - Plains", mana_cost=None, cmc=0.0),
+            _make_card("Grizzly Bears", type_line="Creature - Bear"),
+        ]
+        names, count = _tutor_targets("basic_land", deck_cards, {"plains": 14, "grizzly bears": 1})
+        assert count == 14
+        assert names == ["Plains"]
 
     def test_run_simulation_reports_tutor_in_hand(self):
         tutor = _Slot(_CardClass.OTHER, 2, 0, frozenset(), frozenset(), True)

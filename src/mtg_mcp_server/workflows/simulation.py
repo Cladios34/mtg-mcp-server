@@ -55,6 +55,33 @@ _TUTOR_COLOR_WORDS = frozenset({"white", "blue", "black", "red", "green"})
 _TUTOR_SUBTYPES = frozenset(
     {"Elf", "Goblin", "Dragon", "Angel", "Zombie", "Wizard", "Cleric", "Merfolk", "Rebel", "Ally"}
 )
+# Window of one search effect: from "search your library for" to the end of the
+# sentence. Type keywords are only meaningful inside this window -- a type word
+# in another ability (Stoneforge Mystic's "put an Equipment card from your hand")
+# must not leak into the classification.
+_TUTOR_CLAUSE_RE = re.compile(r"search your library for [^.\n]*", re.IGNORECASE)
+# Card types a search clause may name, in a FIXED order so compound constraint
+# names are stable ("artifact_enchantment", never "enchantment_artifact").
+# Word-boundary patterns run on the lowercased clause: "noncreature" must not
+# read as "creature". Creature keeps the historical "creature card/spell" form
+# so incidental mentions ("that could enchant that creature", Sovereigns of
+# Lost Alara) don't register as a creature tutor.
+_TUTOR_CLAUSE_TYPES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bcreature (?:card|spell)s?\b"), "Creature"),
+    (re.compile(r"\baura\b"), "Aura"),
+    (re.compile(r"\bequipment\b"), "Equipment"),
+    (re.compile(r"\bartifact\b"), "Artifact"),
+    (re.compile(r"\benchantment\b"), "Enchantment"),
+    (re.compile(r"\binstant\b"), "Instant"),
+    (re.compile(r"\bsorcery\b"), "Sorcery"),
+    (re.compile(r"\bplaneswalker\b"), "Planeswalker"),
+    (re.compile(r"\bvehicle\b"), "Vehicle"),
+)
+# Type-line matchers for single and compound type constraints ("aura_equipment").
+# Word boundaries so "Aura" never matches a "Creature - Aurochs" type line.
+_CONSTRAINT_TYPE_RES: dict[str, re.Pattern[str]] = {
+    token.lower(): re.compile(rf"\b{token}\b") for _, token in _TUTOR_CLAUSE_TYPES
+}
 
 
 # ---------------------------------------------------------------------------
@@ -422,34 +449,49 @@ class _TutorInfo(NamedTuple):
 
 
 def _tutor_constraint(oracle: str, lower: str) -> str:
-    """Best-effort category of what a tutor searches for (first match wins).
+    """Best-effort category of what a tutor searches for.
 
-    Fixed order: color creature, creature, equipment, artifact/enchantment,
-    instant/sorcery, named creature subtype, basic land, land, then
-    unconstrained ("any").
+    Type keywords are matched inside the "search your library for ..."
+    clause(s) only, and an enumeration ("an Aura or Equipment card") yields a
+    compound constraint covering EVERY listed type.
     """
-    has_creature = "creature card" in lower or "creature spell" in lower
-    if has_creature and any(w in lower for w in _TUTOR_COLOR_WORDS):
-        return "color_creature"
-    if has_creature:
+    # GOTCHA(2026-08-07): this used to be a first-match cascade over the WHOLE
+    # oracle text. Two failure modes, fixed at the root here rather than by
+    # stacking more keyword patches:
+    # (1) a type word outside the search clause polluted the classification
+    #     (any other ability mentioning "creature card" forced "creature");
+    # (2) only the first matching keyword survived: "an Aura or Equipment
+    #     card" (Open the Armory) classified "equipment" and silently dropped
+    #     every Aura target, while "an Aura card" or "a planeswalker card"
+    #     alone (Heliod's Pilgrim, Call the Gatewatch) matched nothing and
+    #     fell into the "any" fallback -- the same bug fixed on 2026-08-06
+    #     for "Equipment card" (Cloud, Midgar Mercenary / Stoneforge Mystic),
+    #     recurring on each neighboring keyword.
+    clauses = _TUTOR_CLAUSE_RE.findall(oracle)
+    scope = "\n".join(clauses) if clauses else oracle
+    scope_lower = scope.lower() if clauses else lower
+
+    types = [token for pattern, token in _TUTOR_CLAUSE_TYPES if pattern.search(scope_lower)]
+    if types == ["Creature"]:
+        if any(w in scope_lower for w in _TUTOR_COLOR_WORDS):
+            return "color_creature"
         return "creature"
-    # GOTCHA(2026-08-06) : "search your library for an Equipment card" (Cloud
-    # Midgar Mercenary, Stoneforge Mystic...) ne contient ni "artifact" ni
-    # "enchantment" : sans ce test, ces tuteurs tombaient dans le fallback "any".
-    # Vérifié avant le bloc artifact/enchantment : plus spécifique (l'Equipment
-    # est un sous-type d'artefact).
-    if "equipment card" in lower:
-        return "equipment"
-    if "artifact" in lower or "enchantment" in lower:
-        return "artifact_enchantment"
-    if "instant" in lower or "sorcery" in lower:
-        return "instant_sorcery"
+    if types:
+        # DECISION: multi-type enumerations reuse the established compound
+        # naming ("artifact_enchantment" was already a 2-type constraint):
+        # lowercased type names joined by "_" in _TUTOR_CLAUSE_TYPES order,
+        # with OR semantics in _tutor_matches. A dedicated "aura" constraint
+        # (rather than folding into artifact_enchantment) keeps subtype
+        # precision, exactly like the existing "equipment" constraint.
+        # Adjacent conjunctive types ("artifact creature card") are treated
+        # as a union too -- an accepted over-approximation.
+        return "_".join(t.lower() for t in types)
     for sub in _TUTOR_SUBTYPES:
-        if sub in oracle:
+        if sub in scope:
             return f"subtype:{sub}"
-    if "basic land" in lower:
+    if "basic land" in scope_lower:
         return "basic_land"
-    if "land" in lower:
+    if "land" in scope_lower:
         return "land"
     return "any"
 
@@ -492,25 +534,34 @@ def _tutor_matches(constraint: str, card: Card) -> bool:
     t = card.type_line
     if constraint in ("creature", "color_creature"):
         return "Creature" in t
-    if constraint == "equipment":
-        return "Equipment" in t
-    if constraint == "artifact_enchantment":
-        return "Artifact" in t or "Enchantment" in t
-    if constraint == "instant_sorcery":
-        return "Instant" in t or "Sorcery" in t
     if constraint.startswith("subtype:"):
         return constraint.split(":", 1)[1] in t
     if constraint == "basic_land":
         return "Basic" in t and "Land" in t
     if constraint == "land":
         return "Land" in t
+    # Single ("equipment") and compound ("aura_equipment", "artifact_enchantment")
+    # type constraints: a card matching ANY enumerated type is a legal target.
+    parts = constraint.split("_")
+    if all(p in _CONSTRAINT_TYPE_RES for p in parts):
+        return any(_CONSTRAINT_TYPE_RES[p].search(t) for p in parts)
     return True  # "any" or unknown: every card qualifies
 
 
-def _tutor_targets(constraint: str, deck_cards: list[Card]) -> tuple[list[str], int]:
-    """Names (sample of up to 12) and total count of a tutor's legal targets."""
-    matches = [c.name for c in deck_cards if _tutor_matches(constraint, c)]
-    return matches[:12], len(matches)
+def _tutor_targets(
+    constraint: str, deck_cards: list[Card], quantities: dict[str, int] | None = None
+) -> tuple[list[str], int]:
+    """Names (sample of up to 12 distinct) and total count of a tutor's legal targets.
+
+    ``quantities`` maps lowercase card name to copies in the deck; when given,
+    the count is quantity-weighted (a deck with 14 Plains has 14 basic-land
+    targets, not 1) while the name sample stays one entry per distinct card.
+    """
+    matches = [c for c in deck_cards if _tutor_matches(constraint, c)]
+    names = [c.name for c in matches[:12]]
+    if quantities is None:
+        return names, len(matches)
+    return names, sum(quantities.get(c.name.lower(), 1) for c in matches)
 
 
 async def _resolve_deck(
@@ -1198,6 +1249,12 @@ async def simulate_opening_hands(
         cards_by_name, extra_mana_sources=extra_set, exclude_cards=exclude_set
     )
     resolved_cards = list(cards_by_name.values())
+    # Copies per card, so tutor target counts are quantity-weighted (a basic-land
+    # tutor in a 14-Plains deck has 14 targets, not 1 distinct name).
+    card_quantities: dict[str, int] = {}
+    for qty, name in slots:
+        key = name.lower()
+        card_quantities[key] = card_quantities.get(key, 0) + qty
 
     card_classes: dict[str, list[str]] = {c.name: [] for c in _CardClass}
     slot_by_key: dict[str, _Slot] = {}
@@ -1235,7 +1292,9 @@ async def simulate_opening_hands(
                 if classified is not None:
                     is_tutor = True
                     constraint, destination, speed = classified
-                    target_names, target_count = _tutor_targets(constraint, resolved_cards)
+                    target_names, target_count = _tutor_targets(
+                        constraint, resolved_cards, card_quantities
+                    )
                     tutors.append(
                         _TutorInfo(
                             display_name, constraint, destination, speed, target_names, target_count
