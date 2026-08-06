@@ -424,14 +424,22 @@ class _TutorInfo(NamedTuple):
 def _tutor_constraint(oracle: str, lower: str) -> str:
     """Best-effort category of what a tutor searches for (first match wins).
 
-    Fixed order: color creature, creature, artifact/enchantment, instant/sorcery,
-    named creature subtype, basic land, land, then unconstrained ("any").
+    Fixed order: color creature, creature, equipment, artifact/enchantment,
+    instant/sorcery, named creature subtype, basic land, land, then
+    unconstrained ("any").
     """
     has_creature = "creature card" in lower or "creature spell" in lower
     if has_creature and any(w in lower for w in _TUTOR_COLOR_WORDS):
         return "color_creature"
     if has_creature:
         return "creature"
+    # GOTCHA(2026-08-06) : "search your library for an Equipment card" (Cloud
+    # Midgar Mercenary, Stoneforge Mystic...) ne contient ni "artifact" ni
+    # "enchantment" : sans ce test, ces tuteurs tombaient dans le fallback "any".
+    # Vérifié avant le bloc artifact/enchantment : plus spécifique (l'Equipment
+    # est un sous-type d'artefact).
+    if "equipment card" in lower:
+        return "equipment"
     if "artifact" in lower or "enchantment" in lower:
         return "artifact_enchantment"
     if "instant" in lower or "sorcery" in lower:
@@ -484,6 +492,8 @@ def _tutor_matches(constraint: str, card: Card) -> bool:
     t = card.type_line
     if constraint in ("creature", "color_creature"):
         return "Creature" in t
+    if constraint == "equipment":
+        return "Equipment" in t
     if constraint == "artifact_enchantment":
         return "Artifact" in t or "Enchantment" in t
     if constraint == "instant_sorcery":

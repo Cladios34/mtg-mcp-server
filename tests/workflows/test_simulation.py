@@ -812,6 +812,33 @@ _LAND_TAX = _make_card(
         "for up to three basic land cards, reveal them, put them into your hand, then shuffle."
     ),
 )
+# GOTCHA(2026-08-06) : les tuteurs d'équipement ("search your library for an Equipment
+# card") tombaient dans le fallback "any" (84 cibles au lieu des seuls équipements) car
+# "equipment" ne contient ni "artifact" ni "enchantment". Textes oracle vérifiés via
+# Scryfall le 06-08-2026.
+_CLOUD_MIDGAR = _make_card(
+    "Cloud, Midgar Mercenary",
+    type_line="Legendary Creature - Human Soldier Mercenary",
+    mana_cost="{W}{W}",
+    cmc=2.0,
+    oracle_text=(
+        "When Cloud enters, search your library for an Equipment card, reveal it, put it "
+        "into your hand, then shuffle.\n"
+        "As long as Cloud is equipped, if a triggered ability of Cloud or an Equipment "
+        "attached to it triggers, that ability triggers an additional time."
+    ),
+)
+_STONEFORGE_MYSTIC = _make_card(
+    "Stoneforge Mystic",
+    type_line="Creature - Kor Artificer",
+    mana_cost="{1}{W}",
+    cmc=2.0,
+    oracle_text=(
+        "When this creature enters, you may search your library for an Equipment card, "
+        "reveal it, put it into your hand, then shuffle.\n"
+        "{1}{W}, {T}: You may put an Equipment card from your hand onto the battlefield."
+    ),
+)
 
 
 class TestClassifyTutor:
@@ -828,6 +855,10 @@ class TestClassifyTutor:
             (_GREEN_SUNS_ZENITH, ("color_creature", "battlefield", "sorcery")),
             (_CHORD_OF_CALLING, ("creature", "battlefield", "instant")),
             (_LAND_TAX, ("basic_land", "hand", "sorcery")),
+            # Destination "battlefield" pour Stoneforge : sa 2e capacité contient
+            # "onto the battlefield", et le parseur de destination est premier-match.
+            (_CLOUD_MIDGAR, ("equipment", "hand", "sorcery")),
+            (_STONEFORGE_MYSTIC, ("equipment", "battlefield", "sorcery")),
         ],
     )
     def test_classify_known_tutors(self, card: Card, expected: tuple[str, str, str]):
@@ -868,6 +899,16 @@ class TestTutorTargetsAndAggregation:
         deck_cards = [_make_card(f"Beast {i}", type_line="Creature - Beast") for i in range(3)]
         _, count = _tutor_targets("any", deck_cards)
         assert count == 3
+
+    def test_equipment_tutor_targets_only_equipment(self):
+        deck_cards = [
+            _make_card("Lightning Greaves", type_line="Artifact - Equipment", mana_cost="{2}"),
+            _make_card("Sol Ring", type_line="Artifact", mana_cost="{1}"),
+            _make_card("Grizzly Bears", type_line="Creature - Bear"),
+        ]
+        names, count = _tutor_targets("equipment", deck_cards)
+        assert count == 1
+        assert names == ["Lightning Greaves"]
 
     def test_run_simulation_reports_tutor_in_hand(self):
         tutor = _Slot(_CardClass.OTHER, 2, 0, frozenset(), frozenset(), True)
